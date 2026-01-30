@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.cloudscode-data/
+.cloudscode/
+*.db
+*.db-wal
+*.db-shm
+.turbo/
+.env
+.env.local
+.idea/

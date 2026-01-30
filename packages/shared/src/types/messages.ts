@@ -1,4 +1,4 @@
-import type { AgentNode, AgentToolActivity } from './agent.js';
+import type { AgentNode, AgentToolActivity, AgentContextSection, ToolCall } from './agent.js';
 import type { ProjectListItem, Project, ProjectMetadata, StoredMessage } from './project.js';
 import type { ContextBudget } from './context.js';
 import type { MemoryEntry } from './memory.js';
@@ -7,13 +7,16 @@ import type { MemoryEntry } from './memory.js';
 export type ClientMessage =
   | ChatSendMessage
   | ChatInterruptMessage
+  | AgentInterruptMessage
   | ProjectCreateMessage
-  | ProjectResumeMessage;
+  | ProjectResumeMessage
+  | ProjectSkipSetupMessage;
 
 export interface ChatSendMessage {
   type: 'chat:send';
   payload: {
     content: string;
+    model?: string;
   };
 }
 
@@ -21,11 +24,17 @@ export interface ChatInterruptMessage {
   type: 'chat:interrupt';
 }
 
+export interface AgentInterruptMessage {
+  type: 'agent:interrupt';
+  payload: { agentId: string };
+}
+
 export interface ProjectCreateMessage {
   type: 'project:create';
   payload: {
     workspaceId: string;
     title?: string;
+    skipSetup?: boolean;
   };
 }
 
@@ -34,6 +43,10 @@ export interface ProjectResumeMessage {
   payload: {
     projectId: string;
   };
+}
+
+export interface ProjectSkipSetupMessage {
+  type: 'project:skip_setup';
 }
 
 // Server → Client messages
@@ -45,19 +58,24 @@ export type ServerMessage =
   | AgentStoppedMessage
   | AgentResultMessage
   | AgentToolMessage
+  | AgentToolResultMessage
   | ContextUpdateMessage
   | ProjectCreatedMessage
   | ProjectResumedMessage
   | ProjectListMessage
   | ProjectMessagesMessage
+  | ProjectAgentsMessage
   | MemoryUpdatedMessage
-  | ProjectSettingsUpdatedMessage;
+  | AgentContextMessage
+  | ProjectSettingsUpdatedMessage
+  | ProjectSetupCompletedMessage;
 
 export interface ChatTokenMessage {
   type: 'chat:token';
   payload: {
     token: string;
     agentId: string;
+    channel?: 'setup' | 'chat';
   };
 }
 
@@ -68,6 +86,7 @@ export interface ChatMessageComplete {
     content: string;
     agentId: string;
     timestamp: number;
+    channel?: 'setup' | 'chat';
   };
 }
 
@@ -76,6 +95,7 @@ export interface ChatErrorMessage {
   payload: {
     message: string;
     code?: string;
+    channel?: 'setup' | 'chat';
   };
 }
 
@@ -100,6 +120,35 @@ export interface AgentResultMessage {
 export interface AgentToolMessage {
   type: 'agent:tool';
   payload: AgentToolActivity;
+}
+
+export interface AgentToolResultMessage {
+  type: 'agent:tool_result';
+  payload: {
+    toolCallId: string;
+    agentId: string;
+    toolName: string;
+    output: unknown;
+    status: 'completed' | 'failed';
+    durationMs: number;
+  };
+}
+
+export interface AgentContextMessage {
+  type: 'agent:context';
+  payload: {
+    agentId: string;
+    sections: AgentContextSection[];
+  };
+}
+
+export interface ProjectAgentsMessage {
+  type: 'project:agents';
+  payload: {
+    projectId: string;
+    agents: AgentNode[];
+    toolCalls: ToolCall[];
+  };
 }
 
 export interface ContextUpdateMessage {
@@ -147,6 +196,14 @@ export interface ProjectSettingsUpdatedMessage {
     category: string | null; // null for top-level field updates
     data: unknown;
     fullMetadata: ProjectMetadata;
+    projectFields?: Partial<Pick<Project, 'title' | 'description' | 'purpose' | 'primaryLanguage' | 'architecturePattern' | 'directoryPath'>>;
+  };
+}
+
+export interface ProjectSetupCompletedMessage {
+  type: 'project:setup_completed';
+  payload: {
+    projectId: string;
   };
 }
 

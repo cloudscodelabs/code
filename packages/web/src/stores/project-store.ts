@@ -12,6 +12,8 @@ interface ProjectState {
   addProject: (project: ProjectListItem) => void;
   removeProject: (id: string) => void;
   updateProjectMetadata: (projectId: string, metadata: ProjectMetadata) => void;
+  updateProjectFields: (projectId: string, fields: Partial<Pick<Project, 'title' | 'description' | 'purpose' | 'primaryLanguage' | 'architecturePattern' | 'directoryPath'>>) => void;
+  markSetupCompleted: (projectId: string) => void;
 }
 
 export const useProjectStore = create<ProjectState>((set) => ({
@@ -41,4 +43,23 @@ export const useProjectStore = create<ProjectState>((set) => ({
         activeProject: { ...state.activeProject, metadata },
       };
     }),
+
+  updateProjectFields: (projectId, fields) =>
+    set((state) => {
+      if (state.activeProject?.id !== projectId) return state;
+      return {
+        activeProject: { ...state.activeProject, ...fields },
+      };
+    }),
+
+  markSetupCompleted: (projectId) =>
+    set((state) => ({
+      projects: state.projects.map((p) =>
+        p.id === projectId ? { ...p, setupCompleted: true } : p,
+      ),
+      activeProject:
+        state.activeProject?.id === projectId
+          ? { ...state.activeProject, setupCompleted: true }
+          : state.activeProject,
+    })),
 }));

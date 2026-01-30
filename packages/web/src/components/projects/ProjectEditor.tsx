@@ -133,7 +133,7 @@ export function ProjectEditor() {
 
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-800">
-        <h2 className="text-sm font-medium text-zinc-200">Project Settings</h2>
+        <h2 className="text-sm font-medium text-zinc-200">{project.title ?? `Project ${project.id.slice(0, 8)}`}</h2>
         <div className="flex items-center gap-2">
           <button
             onClick={() => setRawMode(!rawMode)}

@@ -1,9 +1,14 @@
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-code';
 import { z } from 'zod';
-import type { ProjectMetadata, ProjectMetadataCategory } from '@cloudscode/shared';
+import type { Project, ProjectMetadata, ProjectMetadataCategory } from '@cloudscode/shared';
 import { getProjectManager } from '../projects/project-manager.js';
 import { broadcast } from '../ws.js';
 import { logger } from '../logger.js';
+import {
+  createProjectDirectory,
+  cloneRepository,
+  validateExistingDirectory,
+} from '../projects/directory-manager.js';
 
 // ---------------------------------------------------------------------------
 // Identifier fields used for smart-matching array items
@@ -151,10 +156,11 @@ function broadcastSettingsUpdate(
   category: string | null,
   data: unknown,
   fullMetadata: ProjectMetadata,
+  projectFields?: Partial<Pick<Project, 'title' | 'description' | 'purpose' | 'primaryLanguage' | 'architecturePattern' | 'directoryPath'>>,
 ): void {
   broadcast({
     type: 'project:settings_updated',
-    payload: { projectId, category, data, fullMetadata },
+    payload: { projectId, category, data, fullMetadata, ...(projectFields ? { projectFields } : {}) },
   });
 }
 
@@ -288,7 +294,7 @@ export function createProjectSettingsMcpServer(projectId: string) {
 
             // Read full metadata for broadcast
             const fullMetadata = pm.getProjectMetadata(projectId) as ProjectMetadata;
-            broadcastSettingsUpdate(projectId, null, updates, fullMetadata);
+            broadcastSettingsUpdate(projectId, null, updates, fullMetadata, updates as Partial<Pick<Project, 'title' | 'description' | 'purpose' | 'primaryLanguage' | 'architecturePattern' | 'directoryPath'>>);
 
             const updatedFields = Object.keys(updates).join(', ');
             return {
@@ -301,6 +307,104 @@ export function createProjectSettingsMcpServer(projectId: string) {
             logger.error({ err, projectId }, 'set_project_info failed');
             return {
               content: [{ type: 'text' as const, text: `Error updating project info: ${err}` }],
+              isError: true,
+            };
+          }
+        },
+      ),
+
+      // ----- Tool 4: setup_project_directory -----
+      tool(
+        'setup_project_directory',
+        'Set up the project working directory. Can create a new directory, clone a git repository, or use an existing directory.',
+        {
+          mode: z.enum(['create', 'clone', 'existing']).describe(
+            'How to set up the directory: "create" = new empty dir, "clone" = git clone a repo, "existing" = use an existing path',
+          ),
+          name: z.string().optional().describe('Directory name (for "create" and "clone" modes). Defaults to project title or repo name.'),
+          repo_url: z.string().optional().describe('Git repository URL (required for "clone" mode)'),
+          directory_path: z.string().optional().describe('Absolute or ~-relative path to existing directory (required for "existing" mode)'),
+        },
+        async ({ mode, name, repo_url, directory_path }) => {
+          try {
+            const pm = getProjectManager();
+            let resultPath: string;
+
+            switch (mode) {
+              case 'create': {
+                const dirName = name || 'project';
+                resultPath = createProjectDirectory(dirName);
+                break;
+              }
+              case 'clone': {
+                if (!repo_url) {
+                  return {
+                    content: [{ type: 'text' as const, text: 'Error: repo_url is required for clone mode.' }],
+                    isError: true,
+                  };
+                }
+                resultPath = cloneRepository(repo_url, name);
+                // Also update the repository URL on the project
+                pm.updateProject(projectId, { repositoryUrl: repo_url });
+                break;
+              }
+              case 'existing': {
+                if (!directory_path) {
+                  return {
+                    content: [{ type: 'text' as const, text: 'Error: directory_path is required for existing mode.' }],
+                    isError: true,
+                  };
+                }
+                resultPath = validateExistingDirectory(directory_path);
+                break;
+              }
+            }
+
+            pm.setDirectoryPath(projectId, resultPath);
+
+            // Broadcast so the frontend receives the directoryPath update
+            const fullMetadata = pm.getProjectMetadata(projectId) as ProjectMetadata;
+            broadcastSettingsUpdate(projectId, null, { directoryPath: resultPath }, fullMetadata, { directoryPath: resultPath });
+
+            return {
+              content: [{
+                type: 'text' as const,
+                text: `Project directory set to: ${resultPath}`,
+              }],
+            };
+          } catch (err) {
+            logger.error({ err, projectId, mode }, 'setup_project_directory failed');
+            return {
+              content: [{ type: 'text' as const, text: `Error setting up directory: ${err}` }],
+              isError: true,
+            };
+          }
+        },
+      ),
+
+      // ----- Tool 5: complete_project_setup -----
+      tool(
+        'complete_project_setup',
+        'Mark the project setup as completed. Call this when all setup questions have been answered or the user wants to skip remaining setup.',
+        {},
+        async () => {
+          try {
+            const pm = getProjectManager();
+            pm.markSetupCompleted(projectId);
+            broadcast({
+              type: 'project:setup_completed',
+              payload: { projectId },
+            });
+            return {
+              content: [{
+                type: 'text' as const,
+                text: 'Project setup completed.',
+              }],
+            };
+          } catch (err) {
+            logger.error({ err, projectId }, 'complete_project_setup failed');
+            return {
+              content: [{ type: 'text' as const, text: `Error completing setup: ${err}` }],
               isError: true,
             };
           }

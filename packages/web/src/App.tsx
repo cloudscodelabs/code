@@ -1,0 +1,68 @@
+import { useEffect } from 'react';
+import { MainLayout } from './components/layout/MainLayout.js';
+import { SetupScreen } from './components/settings/SetupScreen.js';
+import { SettingsModal } from './components/settings/SettingsModal.js';
+import { ProjectSettingsPanel } from './components/projects/ProjectSettingsPanel.js';
+import { ProjectSetupPanel } from './components/setup/ProjectSetupPanel.js';
+import { AgentDetailPanel } from './components/agents/AgentDetailPanel.js';
+import { useWebSocket } from './hooks/useWebSocket.js';
+import { useProjectStore } from './stores/project-store.js';
+import { useSettingsStore } from './stores/settings-store.js';
+import { api } from './lib/api-client.js';
+
+export function App() {
+  useWebSocket();
+
+  const setWorkspaceId = useProjectStore((s) => s.setWorkspaceId);
+  const setProjects = useProjectStore((s) => s.setProjects);
+  const authenticated = useSettingsStore((s) => s.authenticated);
+  const setAuthStatus = useSettingsStore((s) => s.setAuthStatus);
+
+  // Check auth status on mount
+  useEffect(() => {
+    api.getAuthStatus()
+      .then((status) => setAuthStatus(status))
+      .catch(() => setAuthStatus({ authenticated: false, authType: 'none', subscriptionType: null }));
+  }, [setAuthStatus]);
+
+  // Load workspace and projects only when authenticated
+  useEffect(() => {
+    if (authenticated !== true) return;
+
+    api.getWorkspace()
+      .then(({ workspaceId }) => {
+        setWorkspaceId(workspaceId);
+        return api.listProjects(workspaceId);
+      })
+      .then(({ projects }) => {
+        setProjects(projects);
+      })
+      .catch((err) => {
+        console.error('Failed to load workspace:', err);
+      });
+  }, [authenticated, setWorkspaceId, setProjects]);
+
+  // Loading state
+  if (authenticated === null) {
+    return (
+      <div className="flex items-center justify-center h-screen bg-zinc-950">
+        <div className="w-6 h-6 border-2 border-zinc-600 border-t-zinc-300 rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  // Setup gate
+  if (!authenticated) {
+    return <SetupScreen />;
+  }
+
+  return (
+    <>
+      <MainLayout />
+      <ProjectSetupPanel />
+      <ProjectSettingsPanel />
+      <AgentDetailPanel />
+      <SettingsModal />
+    </>
+  );
+}
