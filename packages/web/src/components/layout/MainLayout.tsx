@@ -1,12 +1,8 @@
 import { Sidebar } from './Sidebar.js';
 import { TopBar } from './TopBar.js';
 import { ChatView } from '../chat/ChatView.js';
-import { RightPanel } from './RightPanel.js';
-import { useSettingsStore } from '../../stores/settings-store.js';
 
 export function MainLayout() {
-  const rightPanelOpen = useSettingsStore((s) => s.rightPanelOpen);
-
   return (
     <div className="flex h-screen overflow-hidden">
       <Sidebar />
@@ -16,7 +12,6 @@ export function MainLayout() {
           <main className="flex-1 min-w-0">
             <ChatView />
           </main>
-          {rightPanelOpen && <RightPanel />}
         </div>
       </div>
     </div>

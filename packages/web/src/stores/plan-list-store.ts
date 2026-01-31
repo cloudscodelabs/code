@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type { Plan, PlanListItem } from '@cloudscode/shared';
 import { api } from '../lib/api-client.js';
+import { usePlanPanelStore } from './plan-panel-store.js';
 
 interface PlanListState {
   plans: PlanListItem[];
@@ -12,6 +13,7 @@ interface PlanListState {
   removePlan: (id: string) => void;
   setSelectedPlan: (id: string | null) => void;
   updatePlanInList: (plan: Plan | PlanListItem) => void;
+  selectAndLoadPlan: (planId: string) => Promise<void>;
 }
 
 export const usePlanListStore = create<PlanListState>((set) => ({
@@ -38,6 +40,16 @@ export const usePlanListStore = create<PlanListState>((set) => ({
     })),
 
   setSelectedPlan: (id) => set({ selectedPlanId: id }),
+
+  selectAndLoadPlan: async (planId: string) => {
+    set({ selectedPlanId: planId });
+    try {
+      const fullPlan = await api.getPlan(planId);
+      usePlanPanelStore.getState().setPlan(fullPlan);
+    } catch (err) {
+      console.error('Failed to load plan:', err);
+    }
+  },
 
   updatePlanInList: (plan) =>
     set((state) => {

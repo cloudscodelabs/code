@@ -1,6 +1,7 @@
-import { Circle, CheckCircle2, XCircle, Loader2, SkipForward } from 'lucide-react';
+import { Circle, CheckCircle2, XCircle, Loader2, SkipForward, Shield, ShieldCheck, ShieldX } from 'lucide-react';
 import type { PlanStep, PlanStepStatus } from '@cloudscode/shared';
 import { usePlanPanelStore } from '../../stores/plan-panel-store.js';
+import { useWorkflowStore } from '../../stores/workflow-store.js';
 
 const statusIcons: Record<PlanStepStatus, React.ReactNode> = {
   pending: <Circle size={16} className="text-zinc-500" />,
@@ -47,6 +48,9 @@ export function PlanStepsPanel() {
 }
 
 function StepItem({ step, index }: { step: PlanStep; index: number }) {
+  const qualityGateResults = useWorkflowStore((s) => s.qualityGateResults);
+  const gateResult = qualityGateResults[step.id];
+
   return (
     <div className="flex items-start gap-2 p-2 rounded bg-zinc-800/50">
       <div className="mt-0.5 shrink-0">{statusIcons[step.status]}</div>
@@ -67,7 +71,26 @@ function StepItem({ step, index }: { step: PlanStep; index: number }) {
               {step.estimatedComplexity}
             </span>
           )}
+          {step.qualityGate && !gateResult && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-cyan-900/50 text-cyan-300 flex items-center gap-0.5">
+              <Shield size={9} />
+              {step.qualityGate.type}
+            </span>
+          )}
+          {gateResult && (
+            <span className={`text-[10px] px-1.5 py-0.5 rounded flex items-center gap-0.5 ${
+              gateResult.passed
+                ? 'bg-green-900/50 text-green-300'
+                : 'bg-red-900/50 text-red-300'
+            }`}>
+              {gateResult.passed ? <ShieldCheck size={9} /> : <ShieldX size={9} />}
+              {gateResult.passed ? 'passed' : 'failed'}
+            </span>
+          )}
         </div>
+        {step.resultSummary && (
+          <p className="text-[10px] text-zinc-500 mt-1 line-clamp-1">{step.resultSummary}</p>
+        )}
       </div>
     </div>
   );

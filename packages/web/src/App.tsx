@@ -5,7 +5,9 @@ import { SettingsModal } from './components/settings/SettingsModal.js';
 import { ProjectSettingsPanel } from './components/projects/ProjectSettingsPanel.js';
 import { ProjectSetupPanel } from './components/setup/ProjectSetupPanel.js';
 import { AgentDetailPanel } from './components/agents/AgentDetailPanel.js';
-import { PlanModePanel } from './components/plan/PlanModePanel.js';
+import { PlansPanel } from './components/plan/PlansPanel.js';
+import { MemoryPanel } from './components/memory/MemoryPanel.js';
+import { TokenStatsPanel } from './components/context/TokenStatsPanel.js';
 import { useWebSocket } from './hooks/useWebSocket.js';
 import { useProjectStore } from './stores/project-store.js';
 import { useSettingsStore } from './stores/settings-store.js';
@@ -76,7 +78,9 @@ export function App() {
       <ProjectSetupPanel />
       <ProjectSettingsPanel />
       <AgentDetailPanel />
-      <PlanModePanel />
+      <MemoryPanel />
+      <TokenStatsPanel />
+      <PlansPanel />
       <SettingsModal />
     </>
   );

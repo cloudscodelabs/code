@@ -41,7 +41,11 @@ function runMigrations(db: Database.Database): void {
   for (const migration of migrations) {
     if (!applied.has(migration.name)) {
       logger.info({ migration: migration.name }, 'Applying migration');
-      db.exec(migration.sql);
+      if ('run' in migration && typeof migration.run === 'function') {
+        migration.run(db);
+      } else if (migration.sql) {
+        db.exec(migration.sql);
+      }
       db.prepare('INSERT INTO _migrations (name) VALUES (?)').run(migration.name);
     }
   }
@@ -457,6 +461,46 @@ const migrations = [
     sql: `
       ALTER TABLE messages ADD COLUMN channel TEXT DEFAULT 'chat';
       CREATE INDEX idx_messages_channel ON messages(project_id, channel);
+    `,
+  },
+  {
+    name: '015_workflows',
+    sql: `
+      CREATE TABLE IF NOT EXISTS workflow_templates (
+        id TEXT PRIMARY KEY,
+        project_id TEXT,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        category TEXT NOT NULL DEFAULT 'development',
+        steps TEXT NOT NULL DEFAULT '[]',
+        is_builtin INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_workflow_templates_project ON workflow_templates(project_id);
+
+      ALTER TABLE plans ADD COLUMN workflow_metadata TEXT DEFAULT NULL;
+    `,
+  },
+  {
+    name: '016_memory_promoted_to',
+    sql: '', // Handled programmatically below (SQLite lacks ALTER TABLE ADD COLUMN IF NOT EXISTS)
+    run(db: Database.Database) {
+      const columns = db.pragma('table_info(memory_entries)') as { name: string }[];
+      if (!columns.some((c) => c.name === 'promoted_to')) {
+        db.exec('ALTER TABLE memory_entries ADD COLUMN promoted_to TEXT DEFAULT NULL');
+      }
+    },
+  },
+  {
+    name: '017_plan_session_id',
+    sql: `
+      ALTER TABLE messages ADD COLUMN plan_session_id TEXT;
+      CREATE INDEX idx_messages_plan_session ON messages(plan_session_id);
+
+      ALTER TABLE plans ADD COLUMN plan_session_id TEXT;
+      CREATE INDEX idx_plans_session ON plans(plan_session_id);
     `,
   },
 ];

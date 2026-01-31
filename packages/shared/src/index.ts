@@ -29,6 +29,13 @@ export type { MemoryCategory, MemoryScope, MemoryEntry, MemorySearchResult, Crea
 export type { ContextBudget, AgentTokenUsage, TokenUsageUpdate } from './types/context.js';
 export type { Plan, PlanStep, PlanListItem, PlanStatus, PlanStepStatus } from './types/plan.js';
 export type {
+  BuiltinTemplateId, WorkflowCategory,
+  QualityGate, QualityGateResult,
+  WorkflowTemplateStep, WorkflowTemplate, WorkflowTemplateInput,
+  WorkflowMetadata, RollbackInfo,
+  WorkflowSuggestion,
+} from './types/workflow.js';
+export type {
   ClientMessage, ServerMessage,
   ChatSendMessage, ChatInterruptMessage, ProjectCreateMessage, ProjectResumeMessage,
   ProjectSkipSetupMessage, ProjectSetupCompletedMessage,
@@ -39,6 +46,8 @@ export type {
   PlanSendMessage, PlanInterruptMessage, PlanApproveMessage, PlanSaveMessage, PlanCancelMessage, PlanExecuteMessage,
   PlanUpdatedMessage, PlanStepUpdatedMessage, PlanExecutionStartedMessage, PlanExecutionCompletedMessage,
   PlanSavedMessage, PlanListMessage,
+  WorkflowCreateMessage, WorkflowResumeMessage, WorkflowRollbackMessage,
+  WorkflowSuggestionMessage, WorkflowCheckpointMessage, WorkflowQualityGateMessage, WorkflowRollbackCompletedMessage,
   // Backward compat aliases
   SessionCreateMessage, SessionResumeMessage,
   SessionCreatedMessage, SessionResumedMessage, SessionListMessage, SessionMessagesMessage,

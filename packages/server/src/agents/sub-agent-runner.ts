@@ -16,7 +16,10 @@ export interface SubAgentResult {
   agentType: AgentType;
   responseText: string;
   costUsd: number;
-  tokens: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
   status: 'completed' | 'failed' | 'interrupted';
 }
 
@@ -117,7 +120,10 @@ export async function runSubAgent(
 
   let responseText = '';
   let costUsd = 0;
-  let tokens = 0;
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let cacheReadTokens = 0;
+  let cacheWriteTokens = 0;
 
   try {
     const agentQuery = query({ prompt: plan.taskDescription, options: queryOptions });
@@ -144,9 +150,12 @@ export async function runSubAgent(
         const result = message as any;
         if (result.subtype === 'success') {
           costUsd = result.total_cost_usd ?? 0;
-          tokens = result.usage?.input_tokens ?? 0;
+          inputTokens = result.usage?.input_tokens ?? 0;
+          outputTokens = result.usage?.output_tokens ?? 0;
+          cacheReadTokens = result.usage?.cache_read_input_tokens ?? 0;
+          cacheWriteTokens = result.usage?.cache_creation_input_tokens ?? 0;
 
-          agentManager.updateAgentCost(agentNode.id, costUsd, tokens);
+          agentManager.updateAgentCost(agentNode.id, costUsd, inputTokens + outputTokens);
           agentManager.setAgentResponse(agentNode.id, responseText);
           agentManager.updateAgentStatus(agentNode.id, 'completed', responseText.slice(0, 500));
 
@@ -155,17 +164,29 @@ export async function runSubAgent(
             agentType: plan.agentType,
             responseText,
             costUsd,
-            tokens,
+            inputTokens,
+            outputTokens,
+            cacheReadTokens,
+            cacheWriteTokens,
             status: 'completed',
           };
         } else {
+          costUsd = result.total_cost_usd ?? 0;
+          inputTokens = result.usage?.input_tokens ?? 0;
+          outputTokens = result.usage?.output_tokens ?? 0;
+          cacheReadTokens = result.usage?.cache_read_input_tokens ?? 0;
+          cacheWriteTokens = result.usage?.cache_creation_input_tokens ?? 0;
+
           agentManager.updateAgentStatus(agentNode.id, 'failed');
           return {
             agentId: agentNode.id,
             agentType: plan.agentType,
             responseText,
-            costUsd: result.total_cost_usd ?? 0,
-            tokens: result.usage?.input_tokens ?? 0,
+            costUsd,
+            inputTokens,
+            outputTokens,
+            cacheReadTokens,
+            cacheWriteTokens,
             status: 'failed',
           };
         }
@@ -180,7 +201,10 @@ export async function runSubAgent(
         agentType: plan.agentType,
         responseText,
         costUsd,
-        tokens,
+        inputTokens,
+        outputTokens,
+        cacheReadTokens,
+        cacheWriteTokens,
         status: 'interrupted',
       };
     }
@@ -193,7 +217,10 @@ export async function runSubAgent(
       agentType: plan.agentType,
       responseText,
       costUsd,
-      tokens,
+      inputTokens,
+      outputTokens,
+      cacheReadTokens,
+      cacheWriteTokens,
       status: 'completed',
     };
   } catch (err) {
@@ -206,7 +233,10 @@ export async function runSubAgent(
         agentType: plan.agentType,
         responseText,
         costUsd,
-        tokens,
+        inputTokens,
+        outputTokens,
+        cacheReadTokens,
+        cacheWriteTokens,
         status: 'interrupted',
       };
     }
@@ -217,7 +247,10 @@ export async function runSubAgent(
       agentType: plan.agentType,
       responseText,
       costUsd,
-      tokens,
+      inputTokens,
+      outputTokens,
+      cacheReadTokens,
+      cacheWriteTokens,
       status: 'failed',
     };
   } finally {

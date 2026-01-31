@@ -8,6 +8,8 @@ import { useSettingsStore } from '../stores/settings-store.js';
 import { useSetupPanelStore } from '../stores/setup-panel-store.js';
 import { usePlanPanelStore } from '../stores/plan-panel-store.js';
 import { usePlanListStore } from '../stores/plan-list-store.js';
+import { useWorkflowStore } from '../stores/workflow-store.js';
+import { useMemoryStore } from '../stores/memory-store.js';
 
 function handleMessage(message: ServerMessage): void {
   switch (message.type) {
@@ -194,6 +196,7 @@ function handleMessage(message: ServerMessage): void {
     }
 
     case 'memory:updated': {
+      useMemoryStore.getState().flashMemoryUpdate();
       break;
     }
 
@@ -268,6 +271,38 @@ function handleMessage(message: ServerMessage): void {
 
     case 'plan:list': {
       usePlanListStore.getState().setPlans(message.payload.plans);
+      break;
+    }
+
+    // Workflow messages
+    case 'workflow:suggestion': {
+      useWorkflowStore.getState().setSuggestion({
+        templateId: message.payload.templateId,
+        templateName: message.payload.templateName,
+        confidence: message.payload.confidence,
+        reasoning: message.payload.reasoning,
+      });
+      break;
+    }
+
+    case 'workflow:checkpoint': {
+      useWorkflowStore.getState().setCheckpoint(message.payload.stepId);
+      break;
+    }
+
+    case 'workflow:quality_gate': {
+      useWorkflowStore.getState().setQualityGateResult(
+        message.payload.stepId,
+        message.payload.result,
+      );
+      break;
+    }
+
+    case 'workflow:rollback_completed': {
+      // Reset workflow execution state on rollback
+      if (message.payload.success) {
+        useWorkflowStore.getState().resetExecution();
+      }
       break;
     }
   }

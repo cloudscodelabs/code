@@ -90,8 +90,8 @@ class ProjectManager {
     logger.info({ projectId }, 'Project setup completed');
   }
 
-  addMessage(projectId: string, role: string, content: string, agentId?: string, channel?: 'chat' | 'setup' | 'plan'): StoredMessage {
-    return this.store.addMessage(projectId, role, content, agentId, channel);
+  addMessage(projectId: string, role: string, content: string, agentId?: string, channel?: 'chat' | 'setup' | 'plan', planSessionId?: string): StoredMessage {
+    return this.store.addMessage(projectId, role, content, agentId, channel, planSessionId);
   }
 
   getMessages(projectId: string, channel?: 'chat' | 'setup' | 'plan'): StoredMessage[] {
@@ -102,8 +102,12 @@ class ProjectManager {
     return this.store.getRecentMessages(projectId, limit, channel);
   }
 
-  getPlanMessages(projectId: string): StoredMessage[] {
-    return this.store.getPlanMessages(projectId);
+  getPlanMessages(projectId: string, planSessionId?: string): StoredMessage[] {
+    return this.store.getPlanMessages(projectId, planSessionId);
+  }
+
+  getRecentPlanMessages(projectId: string, planSessionId: string, limit?: number): StoredMessage[] {
+    return this.store.getRecentPlanMessages(projectId, planSessionId, limit);
   }
 }
 

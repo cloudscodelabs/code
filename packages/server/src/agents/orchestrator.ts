@@ -1,9 +1,8 @@
 import { query } from '@anthropic-ai/claude-code';
 import type { Query, SDKMessage, Options } from '@anthropic-ai/claude-code';
-import Anthropic from '@anthropic-ai/sdk';
 import { createProjectSettingsMcpServer } from './project-settings-mcp.js';
 import type { WebSocket } from 'ws';
-import type { Project, AgentType, AgentContextSection, ProjectMetadata, StoredMessage, Plan, PlanStep } from '@cloudscode/shared';
+import type { Project, AgentType, AgentContextSection, ProjectMetadata, StoredMessage, Plan, PlanStep, MemoryEntry } from '@cloudscode/shared';
 import type { Config } from '../config.js';
 import { getAgentManager } from './agent-manager.js';
 import { createHooksConfig } from './hooks.js';
@@ -18,8 +17,14 @@ import { logger } from '../logger.js';
 import { runSubAgent, type SubAgentPlan, type SubAgentResult } from './sub-agent-runner.js';
 import { agentDefinitions } from './agent-definitions.js';
 import { buildProjectContext } from './context-builder.js';
-import { MAX_ROUTING_HISTORY_MESSAGES, MAX_ROUTING_MESSAGE_LENGTH, generateId, nowUnix } from '@cloudscode/shared';
+import { getMemoryStore } from '../context/memory-store.js';
+import { buildUnifiedKnowledge } from './knowledge-dedup.js';
+import { getWorkspaceFiles } from '../workspace/workspace-files.js';
+import { MAX_ROUTING_HISTORY_MESSAGES, MAX_ROUTING_MESSAGE_LENGTH, MAX_MEMORY_INJECTION_ENTRIES, generateId, nowUnix } from '@cloudscode/shared';
 import { getPlanManager } from '../plans/plan-manager.js';
+import { detectWorkflowIntent } from '../workflows/intent-detector.js';
+import { getWorkflowManager } from '../workflows/workflow-manager.js';
+import { WorkflowExecutor } from '../workflows/workflow-executor.js';
 
 // ---------------------------------------------------------------------------
 // System prompts
@@ -120,8 +125,14 @@ Every conversation in plan mode MUST result in a development plan inside a \`\`\
 ## Planning Process
 1. If the user's request is clear enough, produce a plan IMMEDIATELY — do not ask unnecessary questions.
 2. If you genuinely need clarification, ask 1-3 concise questions, then produce a draft plan on your next response.
-3. After receiving research results from sub-agents, ALWAYS produce or update the plan.
-4. If the user says "do it", "go ahead", "yes", or similar — produce the plan based on conversation context.
+3. If the user says "do it", "go ahead", "yes", or similar — produce the plan based on conversation context.
+
+## Conversation Continuity
+- This conversation may span multiple turns. ALWAYS build upon analysis and context from earlier messages.
+- If prior messages contain analysis, findings, or a previously generated plan, reference and leverage that work directly. Do NOT re-analyze or re-read files that were already examined.
+- When the user asks to refine, revise, or build upon prior analysis, use the existing conversation history rather than starting from scratch.
+- If a current plan exists (provided below as "Current Plan"), treat follow-up requests as revisions unless the user explicitly asks for a new plan from scratch.
+- Only perform NEW research when the user asks about something not yet covered.
 
 ## Plan Output Format
 You MUST output your plan in this exact fenced block format:
@@ -156,113 +167,9 @@ You MUST output your plan in this exact fenced block format:
 - Each step should be atomic and clearly described
 - Use dependencies to express ordering constraints between steps
 - Valid agentType values: "code-analyst", "implementer", "test-runner", "researcher"
-- You can revise the plan based on user feedback — always output the full revised plan
+- When revising a plan, output the full revised plan (all steps, not just changed ones)
 - NEVER execute code or make changes — only plan
 - If you don't have enough information, produce a best-effort draft plan and note assumptions`;
-
-// ---------------------------------------------------------------------------
-// Plan routing prompt — read-only agents only
-// ---------------------------------------------------------------------------
-
-function buildPlanRoutingPrompt(project: Project, chatHistory?: StoredMessage[]): string {
-  const planAgents = ['code-analyst', 'researcher'] as const;
-  const agentDescriptions = planAgents
-    .map((type) => `- **${type}**: ${agentDefinitions[type].description}`)
-    .join('\n');
-
-  let historySection = '';
-  if (chatHistory && chatHistory.length > 0) {
-    const truncated = chatHistory.map((m) => {
-      const content = m.content.length > MAX_ROUTING_MESSAGE_LENGTH
-        ? m.content.slice(0, MAX_ROUTING_MESSAGE_LENGTH) + '...'
-        : m.content;
-      return `${m.role}: ${content}`;
-    }).join('\n');
-    historySection = `\n\n## Recent Conversation\n${truncated}`;
-  }
-
-  const projectContext = buildProjectContext(project);
-  const projectContextSection = projectContext
-    ? `\n\n## Project Context\n${projectContext}`
-    : '';
-
-  return `You are a routing agent for plan mode in the project "${project.title ?? 'Untitled'}".
-Project directory: ${project.directoryPath ?? '(not set)'}
-Project purpose: ${project.purpose ?? 'General development'}
-${projectContextSection}
-
-Your job is to analyze the user's message and decide how to handle it. In plan mode, only READ-ONLY agents are available.
-
-## Available Sub-Agents (Read-Only)
-${agentDescriptions}
-${historySection}
-
-## Routing Rules
-- The goal of plan mode is ALWAYS to produce a development plan. Every response should work toward that goal.
-- For clarifying questions or when you can produce a plan directly from context: use planResponse.
-- For code exploration or analysis questions: delegate to code-analyst.
-- For external documentation or research needs: delegate to researcher.
-- For complex questions needing both: delegate to both agents (they run in parallel).
-- NEVER delegate to implementer or test-runner — they are not available in plan mode.
-- If the user says "do it", "go ahead", "yes", or similar: produce a plan from conversation context using planResponse.
-
-## Response Format
-Respond with valid JSON:
-
-**Plan response** (clarifying questions, or producing a plan directly):
-\`\`\`json
-{"planResponse": "Your response text here — ask clarifying questions OR include a \`\`\`plan\`\`\` block"}
-\`\`\`
-
-**Delegate to agents** (need research before planning):
-\`\`\`json
-{
-  "agents": [
-    {"agentType": "code-analyst", "taskDescription": "..."},
-    {"agentType": "researcher", "taskDescription": "..."}
-  ],
-  "synthesisHint": "Brief note on combining results"
-}
-\`\`\`
-
-Respond ONLY with JSON.`;
-}
-
-// ---------------------------------------------------------------------------
-// Plan synthesis prompt
-// ---------------------------------------------------------------------------
-
-function buildPlanSynthesisPrompt(
-  project: Project,
-  userMessage: string,
-  results: SubAgentResult[],
-  synthesisHint: string,
-): string {
-  const resultSections = results
-    .map((r) => `### ${r.agentType} (${r.status})\n${r.responseText || '(no output)'}`)
-    .join('\n\n');
-
-  const projectContext = buildProjectContext(project);
-  const projectContextSection = projectContext
-    ? `\n\n## Project Context\n${projectContext}`
-    : '';
-
-  return `You are synthesizing results from read-only sub-agents for plan mode in the project "${project.title ?? 'Untitled'}".
-Project directory: ${project.directoryPath ?? '(not set)'}
-${projectContextSection}
-
-The user asked: "${userMessage}"
-
-## Sub-Agent Results
-${resultSections}
-
-## Synthesis Instructions
-${synthesisHint || 'Combine the results into a clear, coherent response for the user.'}
-
-You MUST produce a development plan based on the research results. Output the plan inside a \`\`\`plan\`\`\` fenced block with the standard JSON format (title, summary, steps). Each step needs: id, title, description, agentType, estimatedComplexity, dependencies.
-
-If the research is insufficient to produce a complete plan, produce a best-effort draft plan noting assumptions, and explain what additional information is needed.`;
-}
 
 // ---------------------------------------------------------------------------
 // Setup progress — builds context-aware progress for setup resumption
@@ -457,14 +364,13 @@ class Orchestrator {
   private currentQuery: Query | null = null;
   private abortController: AbortController | null = null;
   private currentAgentNodeId: string | null = null;
-  private anthropic: Anthropic | null = null;
   private subAgentAbortControllers = new Map<string, AbortController>();
 
   // Plan mode state
   private planModeActive = false;
   private currentPlan: Plan | null = null;
   private planAbortController: AbortController | null = null;
-  private planSubAgentAbortControllers = new Map<string, AbortController>();
+  private currentPlanSessionId: string | null = null;
 
   constructor(config: Config) {
     this.config = config;
@@ -480,7 +386,7 @@ class Orchestrator {
     this.planModeActive = false;
     this.currentPlan = null;
     this.planAbortController = null;
-    this.planSubAgentAbortControllers.clear();
+    this.currentPlanSessionId = null;
     logger.info({ projectId: project.id }, 'Orchestrator project set');
   }
 
@@ -496,8 +402,17 @@ class Orchestrator {
     this.planModeActive = active;
     if (!active) {
       this.currentPlan = null;
+      this.currentPlanSessionId = null;
     }
-    logger.info({ planModeActive: active }, 'Plan mode toggled');
+    logger.info({ planModeActive: active, planSessionId: this.currentPlanSessionId }, 'Plan mode toggled');
+  }
+
+  private setPlanModeInternal(active: boolean): void {
+    this.planModeActive = active;
+    if (!active) {
+      this.currentPlan = null;
+    }
+    logger.info({ planModeActive: active, planSessionId: this.currentPlanSessionId }, 'Plan mode toggled (internal)');
   }
 
   isPlanMode(): boolean {
@@ -508,11 +423,17 @@ class Orchestrator {
     return this.currentPlan;
   }
 
-  async handlePlanMessage(content: string, ws: WebSocket, opts?: { model?: string }): Promise<void> {
+  getCurrentPlanSessionId(): string | null {
+    return this.currentPlanSessionId;
+  }
+
+  async handlePlanMessage(content: string, ws: WebSocket, opts?: { model?: string; planSessionId?: string }): Promise<void> {
     const model = opts?.model ?? 'sonnet';
 
     if (!this.planModeActive) {
-      this.setPlanMode(true);
+      // New plan session — generate a unique session ID to scope messages
+      this.currentPlanSessionId = opts?.planSessionId ?? generateId();
+      this.setPlanModeInternal(true);
     }
 
     if (!hasValidAuth()) {
@@ -533,11 +454,37 @@ class Orchestrator {
 
     const project = this.currentProject;
 
-    // Persist the user's plan message
+    // Persist the user's plan message scoped to the current plan session
     const projectManager = getProjectManager();
-    projectManager.addMessage(project.id, 'user', content, undefined, 'plan');
+    projectManager.addMessage(project.id, 'user', content, undefined, 'plan', this.currentPlanSessionId ?? undefined);
+
+    // Fire-and-forget workflow suggestion
+    this.suggestWorkflow(content, project.id).catch((err) => {
+      logger.error({ err }, 'Workflow suggestion failed');
+    });
 
     return this.handlePlanMode(content, ws, project, model);
+  }
+
+  private async suggestWorkflow(message: string, projectId: string): Promise<void> {
+    try {
+      const templates = getWorkflowManager().getTemplatesForProject(projectId);
+      const suggestion = await detectWorkflowIntent(message, templates);
+      if (suggestion && suggestion.confidence >= 0.6) {
+        broadcast({
+          type: 'workflow:suggestion',
+          payload: {
+            projectId,
+            templateId: suggestion.templateId,
+            templateName: suggestion.templateName,
+            confidence: suggestion.confidence,
+            reasoning: suggestion.reasoning,
+          },
+        });
+      }
+    } catch (err) {
+      logger.error({ err }, 'suggestWorkflow error');
+    }
   }
 
   async approvePlan(planId: string, ws: WebSocket): Promise<void> {
@@ -555,6 +502,37 @@ class Orchestrator {
       sendTo(ws, { type: 'chat:error', payload: { message: 'Plan not found' } });
       return;
     }
+    return this.executePlan(plan, ws);
+  }
+
+  async resumeWorkflow(planId: string, ws: WebSocket): Promise<void> {
+    const planManager = getPlanManager();
+    const plan = planManager.getPlan(planId);
+    if (!plan) {
+      sendTo(ws, { type: 'chat:error', payload: { message: 'Plan not found' } });
+      return;
+    }
+    if (!plan.workflowMetadata) {
+      sendTo(ws, { type: 'chat:error', payload: { message: 'Not a workflow plan' } });
+      return;
+    }
+
+    // Reset failed/skipped steps after checkpoint to pending
+    const checkpoint = plan.workflowMetadata.checkpointStepId;
+    let pastCheckpoint = !checkpoint;
+    for (const step of plan.steps) {
+      if (step.id === checkpoint) {
+        pastCheckpoint = true;
+        continue;
+      }
+      if (pastCheckpoint && (step.status === 'failed' || step.status === 'skipped')) {
+        step.status = 'pending';
+      }
+    }
+    plan.status = 'ready';
+    planManager.updatePlan(plan.id, { steps: plan.steps, status: 'ready' });
+    broadcast({ type: 'plan:updated', payload: plan });
+
     return this.executePlan(plan, ws);
   }
 
@@ -581,10 +559,6 @@ class Orchestrator {
       this.planAbortController.abort();
       logger.info('Plan query interrupted');
     }
-    for (const [id, controller] of this.planSubAgentAbortControllers) {
-      controller.abort();
-      this.planSubAgentAbortControllers.delete(id);
-    }
   }
 
   cancelPlan(): void {
@@ -596,16 +570,6 @@ class Orchestrator {
       broadcast({ type: 'plan:updated', payload: this.currentPlan });
     }
     this.setPlanMode(false);
-  }
-
-  private getAnthropicClient(): Anthropic {
-    if (!this.anthropic) {
-      const auth = getAuthInfo();
-      this.anthropic = new Anthropic({
-        apiKey: auth.token ?? undefined,
-      });
-    }
-    return this.anthropic;
   }
 
   async handleMessage(content: string, ws: WebSocket, messageOpts?: { persist?: boolean; model?: string }): Promise<void> {
@@ -787,11 +751,26 @@ class Orchestrator {
           if (result.subtype === 'success') {
             agentManager.setAgentResponse(orchestratorNodeId, fullResponse);
             agentManager.updateAgentStatus(orchestratorNodeId, 'completed', result.result);
+
+            const setupInputTokens = result.usage?.input_tokens ?? 0;
+            const setupOutputTokens = result.usage?.output_tokens ?? 0;
+            const setupCacheReadTokens = result.usage?.cache_read_input_tokens ?? 0;
+            const setupCacheWriteTokens = result.usage?.cache_creation_input_tokens ?? 0;
             agentManager.updateAgentCost(
               orchestratorNodeId,
               result.total_cost_usd ?? 0,
-              result.usage?.input_tokens ?? 0,
+              setupInputTokens + setupOutputTokens,
             );
+
+            // Update context budget with full token breakdown
+            const contextManager = getContextManager();
+            contextManager.updateBudget(project.id, {
+              inputTokens: setupInputTokens,
+              outputTokens: setupOutputTokens,
+              cacheReadTokens: setupCacheReadTokens,
+              cacheWriteTokens: setupCacheWriteTokens,
+              costUsd: result.total_cost_usd ?? 0,
+            });
 
             if (fullResponse) {
               projectManager.addMessage(project.id, 'assistant', fullResponse, orchestratorNodeId);
@@ -818,14 +797,14 @@ class Orchestrator {
   // NORMAL MODE — 3-phase boss-style delegation
   // =========================================================================
 
-  private async handleNormalMode(content: string, ws: WebSocket, project: Project, model: string): Promise<void> {
+  private async handleNormalMode(content: string, ws: WebSocket, project: Project, model: string, channel?: 'chat' | 'setup' | 'plan'): Promise<void> {
     const agentManager = getAgentManager();
     const contextManager = getContextManager();
     const summaryCache = getSummaryCache();
     const projectManager = getProjectManager();
 
     // Create orchestrator agent node for tracking
-    const orchestratorNode = agentManager.createAgent(project.id, 'orchestrator', null, null, model);
+    const orchestratorNode = agentManager.createAgent(project.id, 'orchestrator', null, null, model, channel ?? undefined);
     this.currentAgentNodeId = orchestratorNode.id;
 
     this.abortController = new AbortController();
@@ -861,7 +840,8 @@ class Orchestrator {
       // Persist context sections to database
       agentManager.setAgentContextSections(orchestratorNode.id, orchestratorSections);
 
-      const routeResponse = await this.routeMessage(content, project, recentMessages, signal, model);
+      const routeResult = await this.routeMessage(content, project, recentMessages, signal, model);
+      const routingUsage = routeResult.usage ?? { costUsd: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
 
       if (signal.aborted) {
         agentManager.updateAgentStatus(orchestratorNode.id, 'interrupted');
@@ -871,8 +851,8 @@ class Orchestrator {
       // =====================================================================
       // Direct response — no agents needed
       // =====================================================================
-      if (isDirectResponse(routeResponse)) {
-        const responseText = getDirectResponseText(routeResponse);
+      if (isDirectResponse(routeResult)) {
+        const responseText = getDirectResponseText(routeResult);
 
         // Stream the response
         broadcast({
@@ -882,6 +862,7 @@ class Orchestrator {
             content: responseText,
             agentId: orchestratorNode.id,
             timestamp: Date.now(),
+            ...(channel ? { channel } : {}),
           },
         });
 
@@ -889,7 +870,17 @@ class Orchestrator {
         agentManager.updateAgentStatus(orchestratorNode.id, 'completed', responseText.slice(0, 500));
 
         // Persist the response
-        projectManager.addMessage(project.id, 'assistant', responseText, orchestratorNode.id);
+        projectManager.addMessage(project.id, 'assistant', responseText, orchestratorNode.id, channel);
+
+        // Update budget with routing tokens
+        contextManager.updateBudget(project.id, {
+          inputTokens: routingUsage.inputTokens,
+          outputTokens: routingUsage.outputTokens,
+          cacheReadTokens: routingUsage.cacheReadTokens,
+          cacheWriteTokens: routingUsage.cacheWriteTokens,
+          costUsd: routingUsage.costUsd,
+        });
+        agentManager.updateAgentCost(orchestratorNode.id, routingUsage.costUsd, routingUsage.inputTokens + routingUsage.outputTokens);
 
         // Update summary
         summaryCache.updateFromResponse(project.id, content, responseText);
@@ -900,12 +891,12 @@ class Orchestrator {
       // =====================================================================
       // Phase 2: Execute — Run sub-agents sequentially
       // =====================================================================
-      logger.info({ projectId: project.id, agentCount: routeResponse.agents.length }, 'Phase 2: Executing sub-agents');
+      logger.info({ projectId: project.id, agentCount: routeResult.agents.length }, 'Phase 2: Executing sub-agents');
 
       const cwd = project.directoryPath ?? this.config.PROJECT_ROOT;
       const results: SubAgentResult[] = [];
 
-      for (const agentPlan of routeResponse.agents) {
+      for (const agentPlan of routeResult.agents) {
         if (signal.aborted) {
           break;
         }
@@ -923,6 +914,7 @@ class Orchestrator {
           orchestratorNode.id,
           plan.taskDescription,
           plan.model ?? null,
+          channel ?? undefined,
         );
         const agentAbortController = new AbortController();
         this.subAgentAbortControllers.set(preCreatedAgentNode.id, agentAbortController);
@@ -930,6 +922,7 @@ class Orchestrator {
         const result = await runSubAgent(plan, project, orchestratorNode.id, signal, cwd, {
           preCreatedAgentNode,
           agentAbortController,
+          ...(channel ? { channel } : {}),
         });
 
         this.subAgentAbortControllers.delete(preCreatedAgentNode.id);
@@ -954,7 +947,7 @@ class Orchestrator {
           .map((r) => r.responseText)
           .join('\n\n');
         if (partialResponse) {
-          projectManager.addMessage(project.id, 'assistant', partialResponse, orchestratorNode.id);
+          projectManager.addMessage(project.id, 'assistant', partialResponse, orchestratorNode.id, channel);
         }
         return;
       }
@@ -963,6 +956,7 @@ class Orchestrator {
       // Phase 3: Synthesize — Combine results (skip if single agent)
       // =====================================================================
       let finalResponse: string;
+      let synthesisUsage = { costUsd: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
 
       const successfulResults = results.filter((r) => r.responseText);
 
@@ -975,14 +969,16 @@ class Orchestrator {
         // Multiple agents — synthesize results
         logger.info({ projectId: project.id }, 'Phase 3: Synthesizing results');
 
-        finalResponse = await this.synthesizeResults(
+        const synthesisResult = await this.synthesizeResults(
           content,
           project,
           successfulResults,
-          routeResponse.synthesisHint ?? '',
+          routeResult.synthesisHint ?? '',
           signal,
           model,
         );
+        finalResponse = synthesisResult.text;
+        synthesisUsage = { costUsd: synthesisResult.costUsd, inputTokens: synthesisResult.inputTokens, outputTokens: synthesisResult.outputTokens, cacheReadTokens: synthesisResult.cacheReadTokens, cacheWriteTokens: synthesisResult.cacheWriteTokens };
 
         if (signal.aborted) {
           agentManager.updateAgentStatus(orchestratorNode.id, 'interrupted');
@@ -997,6 +993,7 @@ class Orchestrator {
             content: finalResponse,
             agentId: orchestratorNode.id,
             timestamp: Date.now(),
+            ...(channel ? { channel } : {}),
           },
         });
       }
@@ -1005,28 +1002,48 @@ class Orchestrator {
       // Post-processing
       // =====================================================================
 
-      // Aggregate costs from sub-agents
-      const totalCost = results.reduce((sum, r) => sum + r.costUsd, 0);
-      const totalTokens = results.reduce((sum, r) => sum + r.tokens, 0);
+      // Aggregate costs from sub-agents + routing + synthesis
+      const subAgentCost = results.reduce((sum, r) => sum + r.costUsd, 0);
+      const subAgentInputTokens = results.reduce((sum, r) => sum + r.inputTokens, 0);
+      const subAgentOutputTokens = results.reduce((sum, r) => sum + r.outputTokens, 0);
+      const subAgentCacheReadTokens = results.reduce((sum, r) => sum + r.cacheReadTokens, 0);
+      const subAgentCacheWriteTokens = results.reduce((sum, r) => sum + r.cacheWriteTokens, 0);
 
-      agentManager.updateAgentCost(orchestratorNode.id, totalCost, totalTokens);
+      const totalCost = subAgentCost + routingUsage.costUsd + synthesisUsage.costUsd;
+      const totalInputTokens = subAgentInputTokens + routingUsage.inputTokens + synthesisUsage.inputTokens;
+      const totalOutputTokens = subAgentOutputTokens + routingUsage.outputTokens + synthesisUsage.outputTokens;
+      const totalCacheReadTokens = subAgentCacheReadTokens + routingUsage.cacheReadTokens + synthesisUsage.cacheReadTokens;
+      const totalCacheWriteTokens = subAgentCacheWriteTokens + routingUsage.cacheWriteTokens + synthesisUsage.cacheWriteTokens;
+
+      agentManager.updateAgentCost(orchestratorNode.id, totalCost, totalInputTokens + totalOutputTokens);
       agentManager.setAgentResponse(orchestratorNode.id, finalResponse);
       agentManager.updateAgentStatus(orchestratorNode.id, 'completed', finalResponse.slice(0, 500));
 
       // Update context budget
       contextManager.updateBudget(project.id, {
-        inputTokens: totalTokens,
-        outputTokens: 0,
-        cacheReadTokens: 0,
-        cacheWriteTokens: 0,
+        inputTokens: totalInputTokens,
+        outputTokens: totalOutputTokens,
+        cacheReadTokens: totalCacheReadTokens,
+        cacheWriteTokens: totalCacheWriteTokens,
         costUsd: totalCost,
       });
+
+      // Update per-agent breakdown
+      for (const r of results) {
+        contextManager.updateAgentUsage(project.id, r.agentId, r.agentType, {
+          inputTokens: r.inputTokens,
+          outputTokens: r.outputTokens,
+          cacheReadTokens: r.cacheReadTokens,
+          cacheWriteTokens: r.cacheWriteTokens,
+          costUsd: r.costUsd,
+        });
+      }
 
       // Update summary
       summaryCache.updateFromResponse(project.id, content, finalResponse);
 
       // Persist the final response
-      projectManager.addMessage(project.id, 'assistant', finalResponse, orchestratorNode.id);
+      projectManager.addMessage(project.id, 'assistant', finalResponse, orchestratorNode.id, channel);
 
       // Refresh project state in case settings tools updated it
       const refreshed = projectManager.getProject(project.id);
@@ -1045,7 +1062,7 @@ class Orchestrator {
       agentManager.updateAgentStatus(orchestratorNode.id, 'failed');
       sendTo(ws, {
         type: 'chat:error',
-        payload: { message: err instanceof Error ? err.message : 'Query failed' },
+        payload: { message: err instanceof Error ? err.message : 'Query failed', ...(channel ? { channel } : {}) },
       });
     } finally {
       this.abortController = null;
@@ -1057,28 +1074,35 @@ class Orchestrator {
   // Phase 1: Route — Direct Anthropic API call
   // =========================================================================
 
-  private async routeMessage(content: string, project: Project, chatHistory: StoredMessage[], signal: AbortSignal, model: string = 'sonnet'): Promise<RouteResponse> {
-    const client = this.getAnthropicClient();
+  private async routeMessage(
+    content: string,
+    project: Project,
+    chatHistory: StoredMessage[],
+    signal: AbortSignal,
+    model: string = 'sonnet',
+  ): Promise<RouteResponse & { usage?: { costUsd: number; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number } }> {
     const routingPrompt = buildRoutingPrompt(project, chatHistory);
 
     try {
-      const response = await client.messages.create({
-        model: resolveModelId(model),
-        max_tokens: 1024,
-        system: routingPrompt,
-        messages: [{ role: 'user', content }],
+      const q = query({
+        prompt: content,
+        options: {
+          customSystemPrompt: routingPrompt,
+          permissionMode: 'plan',
+          model: resolveModelId(model),
+          maxTurns: 1,
+          includePartialMessages: true,
+          cwd: project.directoryPath ?? this.config.PROJECT_ROOT,
+          env: this.buildEnv(),
+          abortController: this.abortController ?? undefined,
+        },
       });
 
-      if (signal.aborted) {
-        return { directResponse: '' };
-      }
+      const { text: responseText, costUsd, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens } = await this.collectQueryText(q, signal);
+      const usage = { costUsd, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens };
 
-      // Extract text from response
-      let responseText = '';
-      for (const block of response.content) {
-        if (block.type === 'text') {
-          responseText += block.text;
-        }
+      if (signal.aborted) {
+        return { directResponse: '', usage };
       }
 
       // Parse JSON from response (may be wrapped in markdown code block)
@@ -1087,7 +1111,7 @@ class Orchestrator {
 
       // Validate the response
       if (isDirectResponse(parsed)) {
-        return parsed;
+        return { ...parsed, usage };
       }
 
       // Validate agent types
@@ -1096,12 +1120,13 @@ class Orchestrator {
 
       if (validatedAgents.length === 0) {
         // Fallback to direct response if no valid agents
-        return { directResponse: responseText };
+        return { directResponse: responseText, usage };
       }
 
       return {
         agents: validatedAgents,
         synthesisHint: parsed.synthesisHint,
+        usage,
       };
     } catch (err) {
       logger.error({ err }, 'Routing API call failed');
@@ -1128,34 +1153,35 @@ class Orchestrator {
     synthesisHint: string,
     signal: AbortSignal,
     model: string = 'sonnet',
-  ): Promise<string> {
-    const client = this.getAnthropicClient();
+  ): Promise<{ text: string; costUsd: number; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number }> {
     const prompt = buildSynthesisPrompt(project, userMessage, results, synthesisHint);
 
     try {
-      const response = await client.messages.create({
-        model: resolveModelId(model),
-        max_tokens: 4096,
-        system: 'You synthesize results from development agents into clear, helpful responses.',
-        messages: [{ role: 'user', content: prompt }],
+      const q = query({
+        prompt,
+        options: {
+          customSystemPrompt: 'You synthesize results from development agents into clear, helpful responses.',
+          permissionMode: 'plan',
+          model: resolveModelId(model),
+          maxTurns: 1,
+          includePartialMessages: true,
+          cwd: project.directoryPath ?? this.config.PROJECT_ROOT,
+          env: this.buildEnv(),
+          abortController: this.abortController ?? undefined,
+        },
       });
 
+      const collected = await this.collectQueryText(q, signal);
+
       if (signal.aborted) {
-        return results.map((r) => r.responseText).join('\n\n');
+        return { text: results.map((r) => r.responseText).join('\n\n'), costUsd: collected.costUsd, inputTokens: collected.inputTokens, outputTokens: collected.outputTokens, cacheReadTokens: collected.cacheReadTokens, cacheWriteTokens: collected.cacheWriteTokens };
       }
 
-      let responseText = '';
-      for (const block of response.content) {
-        if (block.type === 'text') {
-          responseText += block.text;
-        }
-      }
-
-      return responseText || results.map((r) => r.responseText).join('\n\n');
+      return { text: collected.text || results.map((r) => r.responseText).join('\n\n'), costUsd: collected.costUsd, inputTokens: collected.inputTokens, outputTokens: collected.outputTokens, cacheReadTokens: collected.cacheReadTokens, cacheWriteTokens: collected.cacheWriteTokens };
     } catch (err) {
       logger.error({ err }, 'Synthesis API call failed');
       // Fallback: concatenate sub-agent results
-      return results.map((r) => `## ${r.agentType}\n${r.responseText}`).join('\n\n');
+      return { text: results.map((r) => `## ${r.agentType}\n${r.responseText}`).join('\n\n'), costUsd: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
     }
   }
 
@@ -1226,6 +1252,47 @@ class Orchestrator {
     return env;
   }
 
+  /**
+   * Iterates over a query() stream, optionally forwarding messages to the UI,
+   * and collects all assistant text blocks into a single string along with
+   * usage data from the result message.
+   */
+  private async collectQueryText(
+    q: Query,
+    signal: AbortSignal,
+    agentId?: string,
+    ws?: WebSocket,
+    channel?: 'setup' | 'chat' | 'plan',
+  ): Promise<{ text: string; costUsd: number; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number }> {
+    let text = '';
+    let costUsd = 0;
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let cacheReadTokens = 0;
+    let cacheWriteTokens = 0;
+
+    for await (const message of q) {
+      if (signal.aborted) break;
+      if (agentId && ws && channel) {
+        this.processMessage(message, agentId, ws, channel);
+      }
+      if (message.type === 'assistant') {
+        for (const block of (message as any).message.content) {
+          if (block.type === 'text') text += block.text;
+        }
+      }
+      if (message.type === 'result') {
+        const result = message as any;
+        costUsd = result.total_cost_usd ?? 0;
+        inputTokens = result.usage?.input_tokens ?? 0;
+        outputTokens = result.usage?.output_tokens ?? 0;
+        cacheReadTokens = result.usage?.cache_read_input_tokens ?? 0;
+        cacheWriteTokens = result.usage?.cache_creation_input_tokens ?? 0;
+      }
+    }
+    return { text, costUsd, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens };
+  }
+
   // =========================================================================
   // Plan mode — private implementation
   // =========================================================================
@@ -1240,134 +1307,46 @@ class Orchestrator {
     const signal = this.planAbortController.signal;
 
     try {
-      // Phase 1: Route through plan-specific routing (read-only agents only)
-      logger.info({ projectId: project.id }, 'Plan mode: routing');
+      logger.info({ projectId: project.id, planSessionId: this.currentPlanSessionId }, 'Plan mode: generating plan via query()');
 
-      const recentMessages = projectManager.getRecentMessages(project.id, MAX_ROUTING_HISTORY_MESSAGES, 'plan');
-      const routeResponse = await this.routePlanMessage(content, project, recentMessages, signal, model);
+      // Gather recent plan conversation scoped to the current plan session
+      const recentMessages = this.currentPlanSessionId
+        ? projectManager.getRecentPlanMessages(project.id, this.currentPlanSessionId, MAX_ROUTING_HISTORY_MESSAGES)
+        : projectManager.getRecentMessages(project.id, MAX_ROUTING_HISTORY_MESSAGES, 'plan');
+
+      // Generate plan via query() SDK call (handles OAuth internally)
+      const responseText = await this.generatePlan(content, project, recentMessages, signal, ws, model);
 
       if (signal.aborted) {
         agentManager.updateAgentStatus(orchestratorNode.id, 'interrupted');
         return;
       }
 
-      // Direct/plan response
-      if (isDirectResponse(routeResponse)) {
-        const responseText = getDirectResponseText(routeResponse);
+      // Try to extract a plan from the response (populates the dedicated steps UI)
+      this.tryExtractPlan(responseText, project);
 
+      // Strip the ```plan``` JSON block from chat — the steps UI already shows it
+      const chatText = responseText.replace(/```plan\s*\n[\s\S]*?\n```/g, '').trim();
+
+      // Broadcast the response via plan channel
+      if (chatText) {
         broadcast({
           type: 'chat:message',
           payload: {
             role: 'assistant',
-            content: responseText,
+            content: chatText,
             agentId: orchestratorNode.id,
             timestamp: Date.now(),
             channel: 'plan',
           },
         });
-
-        agentManager.setAgentResponse(orchestratorNode.id, responseText);
-        agentManager.updateAgentStatus(orchestratorNode.id, 'completed', responseText.slice(0, 500));
-
-        // Persist assistant plan message
-        projectManager.addMessage(project.id, 'assistant', responseText, orchestratorNode.id, 'plan');
-
-        // Try to extract a plan from direct responses too
-        this.tryExtractPlan(responseText, project);
-
-        return;
       }
 
-      // Phase 2: Execute read-only sub-agents in PARALLEL
-      logger.info({ projectId: project.id, agentCount: routeResponse.agents.length }, 'Plan mode: executing sub-agents in parallel');
+      agentManager.setAgentResponse(orchestratorNode.id, responseText);
+      agentManager.updateAgentStatus(orchestratorNode.id, 'completed', responseText.slice(0, 500));
 
-      const cwd = project.directoryPath ?? this.config.PROJECT_ROOT;
-      const agentPromises = routeResponse.agents.map(async (agentPlan) => {
-        if (signal.aborted) {
-          return null;
-        }
-
-        const plan: SubAgentPlan = {
-          agentType: agentPlan.agentType,
-          taskDescription: agentPlan.taskDescription,
-          model,
-        };
-
-        const preCreatedAgentNode = agentManager.createAgent(
-          project.id,
-          plan.agentType,
-          orchestratorNode.id,
-          plan.taskDescription,
-          plan.model ?? null,
-          'plan',
-        );
-        const agentAbortController = new AbortController();
-        this.planSubAgentAbortControllers.set(preCreatedAgentNode.id, agentAbortController);
-
-        const result = await runSubAgent(plan, project, orchestratorNode.id, signal, cwd, {
-          preCreatedAgentNode,
-          agentAbortController,
-          channel: 'plan',
-        });
-
-        this.planSubAgentAbortControllers.delete(preCreatedAgentNode.id);
-        return result;
-      });
-
-      const rawResults = await Promise.all(agentPromises);
-      const results = rawResults.filter((r): r is SubAgentResult => r !== null);
-
-      if (signal.aborted) {
-        agentManager.updateAgentStatus(orchestratorNode.id, 'interrupted');
-        return;
-      }
-
-      // Phase 3: Synthesize with plan-aware prompt
-      let finalResponse: string;
-      const successfulResults = results.filter((r) => r.responseText);
-
-      if (successfulResults.length === 0) {
-        finalResponse = 'The sub-agents did not produce output. Could you provide more details about what you want to plan?';
-      } else if (successfulResults.length === 1) {
-        finalResponse = successfulResults[0].responseText;
-      } else {
-        logger.info({ projectId: project.id }, 'Plan mode: synthesizing results');
-
-        finalResponse = await this.synthesizePlanResults(
-          content,
-          project,
-          successfulResults,
-          routeResponse.synthesisHint ?? '',
-          signal,
-          model,
-        );
-
-        if (signal.aborted) {
-          agentManager.updateAgentStatus(orchestratorNode.id, 'interrupted');
-          return;
-        }
-      }
-
-      // Broadcast synthesized response via plan channel
-      broadcast({
-        type: 'chat:message',
-        payload: {
-          role: 'assistant',
-          content: finalResponse,
-          agentId: orchestratorNode.id,
-          timestamp: Date.now(),
-          channel: 'plan',
-        },
-      });
-
-      agentManager.setAgentResponse(orchestratorNode.id, finalResponse);
-      agentManager.updateAgentStatus(orchestratorNode.id, 'completed', finalResponse.slice(0, 500));
-
-      // Persist assistant plan message
-      projectManager.addMessage(project.id, 'assistant', finalResponse, orchestratorNode.id, 'plan');
-
-      // Try to extract a plan from the response
-      this.tryExtractPlan(finalResponse, project);
+      // Persist assistant plan message (full text kept for history), scoped to plan session
+      projectManager.addMessage(project.id, 'assistant', responseText, orchestratorNode.id, 'plan', this.currentPlanSessionId ?? undefined);
 
     } catch (err) {
       logger.error({ err }, 'Plan mode error');
@@ -1378,97 +1357,125 @@ class Orchestrator {
       });
     } finally {
       this.planAbortController = null;
-      this.planSubAgentAbortControllers.clear();
     }
   }
 
-  private async routePlanMessage(content: string, project: Project, chatHistory: StoredMessage[], signal: AbortSignal, model: string = 'sonnet'): Promise<RouteResponse> {
-    const client = this.getAnthropicClient();
-    const routingPrompt = buildPlanRoutingPrompt(project, chatHistory);
-
-    try {
-      const response = await client.messages.create({
-        model: resolveModelId(model),
-        max_tokens: 1024,
-        system: routingPrompt,
-        messages: [{ role: 'user', content }],
-      });
-
-      if (signal.aborted) {
-        return { directResponse: '' };
-      }
-
-      let responseText = '';
-      for (const block of response.content) {
-        if (block.type === 'text') {
-          responseText += block.text;
-        }
-      }
-
-      const jsonStr = responseText.replace(/```json\s*\n?/g, '').replace(/```\s*$/g, '').trim();
-      const parsed = JSON.parse(jsonStr) as RouteResponse;
-
-      if (isDirectResponse(parsed)) {
-        return parsed;
-      }
-
-      // Only allow read-only agent types in plan mode
-      const readOnlyTypes = new Set<string>(['code-analyst', 'researcher']);
-      const validatedAgents = parsed.agents.filter((a) => readOnlyTypes.has(a.agentType));
-
-      if (validatedAgents.length === 0) {
-        return { directResponse: responseText };
-      }
-
-      return {
-        agents: validatedAgents,
-        synthesisHint: parsed.synthesisHint,
-      };
-    } catch (err) {
-      logger.error({ err }, 'Plan routing API call failed');
-      return {
-        agents: [{
-          agentType: 'code-analyst',
-          taskDescription: content,
-        }],
-      };
-    }
-  }
-
-  private async synthesizePlanResults(
-    userMessage: string,
+  private async generatePlan(
+    content: string,
     project: Project,
-    results: SubAgentResult[],
-    synthesisHint: string,
+    recentMessages: StoredMessage[],
     signal: AbortSignal,
+    ws: WebSocket,
     model: string = 'sonnet',
   ): Promise<string> {
-    const client = this.getAnthropicClient();
-    const prompt = buildPlanSynthesisPrompt(project, userMessage, results, synthesisHint);
+    // Build rich context from project metadata, workspace files, and session summary
+    const contextParts: string[] = [];
+
+    // Project knowledge: settings + memory entries (unified & deduplicated)
+    try {
+      const projectCtx = buildProjectContext(project);
+      let memoryEntries: MemoryEntry[] = [];
+      try {
+        const memoryStore = getMemoryStore();
+        const results = memoryStore.searchByProject(
+          project.workspaceId, project.id, content, MAX_MEMORY_INJECTION_ENTRIES,
+        );
+        if (results.length > 0) {
+          memoryEntries = results.map((r) => r.entry);
+        } else {
+          const recent = memoryStore.listByProject(project.workspaceId, project.id);
+          memoryEntries = recent.slice(0, MAX_MEMORY_INJECTION_ENTRIES);
+        }
+      } catch {
+        logger.debug('MemoryStore not available for plan context');
+      }
+
+      const unified = buildUnifiedKnowledge(projectCtx, memoryEntries, project.metadata, project.updatedAt);
+      if (unified) {
+        contextParts.push(`## Project Knowledge\n${unified}`);
+      }
+    } catch {
+      // Fallback to basic project context
+      const projectContext = buildProjectContext(project);
+      if (projectContext) {
+        contextParts.push(`## Project Context\n${projectContext}`);
+      }
+    }
+
+    // Workspace files (PROJECT.md, CONVENTIONS.md)
+    try {
+      const workspaceFiles = getWorkspaceFiles();
+      const wsContext = workspaceFiles.getContext();
+      if (wsContext) {
+        contextParts.push(`## Workspace Files\n${wsContext}`);
+      }
+    } catch {
+      logger.debug('WorkspaceFiles not available for plan context');
+    }
+
+    // Session summary
+    try {
+      const summaryCache = getSummaryCache();
+      const summary = summaryCache.getSummary(project.id);
+      if (summary) {
+        contextParts.push(`## Session Summary\n${summary}`);
+      }
+    } catch {
+      logger.debug('SummaryCache not available for plan context');
+    }
+
+    // Inject existing plan if one was previously generated in this session
+    if (this.currentPlan && this.currentPlan.status !== 'cancelled') {
+      const planJson = JSON.stringify({
+        title: this.currentPlan.title,
+        summary: this.currentPlan.summary,
+        steps: this.currentPlan.steps.map(s => ({
+          id: s.id,
+          title: s.title,
+          description: s.description,
+          agentType: s.agentType,
+          estimatedComplexity: s.estimatedComplexity,
+          dependencies: s.dependencies,
+        })),
+      }, null, 2);
+      contextParts.push(`## Current Plan\nThe following plan was previously generated in this conversation. Build upon it for any follow-up requests unless the user explicitly asks to start fresh.\n\`\`\`json\n${planJson}\n\`\`\``);
+    }
+
+    // Build the user message with inline context
+    const contextSection = contextParts.length > 0
+      ? contextParts.join('\n\n') + '\n\n'
+      : '';
+
+    // Include plan conversation history in the prompt
+    const historyText = recentMessages
+      .slice(0, -1) // skip the latest user message
+      .map((m) => `${m.role}: ${m.content}`)
+      .join('\n\n');
+
+    const fullPrompt = historyText
+      ? `${historyText}\n\n${contextSection}## User Request\n${content}`
+      : `${contextSection}## User Request\n${content}`;
 
     try {
-      const response = await client.messages.create({
-        model: resolveModelId(model),
-        max_tokens: 4096,
-        system: PLAN_SYSTEM_PROMPT,
-        messages: [{ role: 'user', content: prompt }],
+      const q = query({
+        prompt: fullPrompt,
+        options: {
+          customSystemPrompt: PLAN_SYSTEM_PROMPT,
+          permissionMode: 'plan',
+          model: resolveModelId(model),
+          includePartialMessages: true,
+          cwd: project.directoryPath ?? this.config.PROJECT_ROOT,
+          env: this.buildEnv(),
+          abortController: this.planAbortController ?? undefined,
+        },
       });
 
-      if (signal.aborted) {
-        return results.map((r) => r.responseText).join('\n\n');
-      }
+      const { text: responseText } = await this.collectQueryText(q, signal, this.currentAgentNodeId!, ws, 'plan');
 
-      let responseText = '';
-      for (const block of response.content) {
-        if (block.type === 'text') {
-          responseText += block.text;
-        }
-      }
-
-      return responseText || results.map((r) => r.responseText).join('\n\n');
+      return responseText || 'I was unable to generate a plan. Could you provide more details about what you want to accomplish?';
     } catch (err) {
-      logger.error({ err }, 'Plan synthesis API call failed');
-      return results.map((r) => `## ${r.agentType}\n${r.responseText}`).join('\n\n');
+      logger.error({ err }, 'Plan generation API call failed');
+      throw err;
     }
   }
 
@@ -1491,17 +1498,34 @@ class Orchestrator {
         estimatedComplexity: s.estimatedComplexity,
       }));
 
-      const plan = planManager.createPlan({
-        projectId: project.id,
-        title: planData.title || 'Untitled Plan',
-        summary: planData.summary || '',
-        steps,
-        status: 'ready',
-      });
+      let plan: Plan;
+
+      if (this.currentPlan && this.currentPlan.status !== 'cancelled') {
+        // Update existing plan rather than creating a new one
+        const updates = {
+          title: planData.title || this.currentPlan.title,
+          summary: planData.summary || this.currentPlan.summary,
+          steps,
+          status: 'ready' as const,
+        };
+        planManager.updatePlan(this.currentPlan.id, updates);
+        plan = { ...this.currentPlan, ...updates, updatedAt: nowUnix() };
+        logger.info({ planId: plan.id, stepCount: plan.steps.length }, 'Plan revised from response');
+      } else {
+        // First plan in this session — create new record
+        plan = planManager.createPlan({
+          projectId: project.id,
+          title: planData.title || 'Untitled Plan',
+          summary: planData.summary || '',
+          steps,
+          status: 'ready',
+          planSessionId: this.currentPlanSessionId,
+        });
+        logger.info({ planId: plan.id, stepCount: plan.steps.length }, 'Plan extracted from response');
+      }
 
       this.currentPlan = plan;
       broadcast({ type: 'plan:updated', payload: plan });
-      logger.info({ planId: plan.id, stepCount: plan.steps.length }, 'Plan extracted from response');
 
       // Notify the user the plan is ready for review
       broadcast({
@@ -1537,48 +1561,70 @@ class Orchestrator {
     // Exit plan mode
     this.setPlanMode(false);
 
-    // Build execution order respecting dependencies (topological sort)
-    const executionOrder = this.buildExecutionOrder(plan.steps);
-
-    let allSucceeded = true;
-
-    for (const step of executionOrder) {
-      // Update step to in_progress
-      step.status = 'in_progress';
-      planManager.updatePlanStep(plan.id, step);
-      broadcast({ type: 'plan:step_updated', payload: { planId: plan.id, step } });
-
-      try {
-        // Execute the step through normal mode
-        await this.handleNormalMode(
-          `[Plan Step ${step.id}] ${step.title}\n\n${step.description}`,
-          ws,
-          project,
-          'sonnet',
-        );
-
-        step.status = 'completed';
-      } catch (err) {
-        logger.error({ err, stepId: step.id }, 'Plan step execution failed');
-        step.status = 'failed';
-        allSucceeded = false;
+    try {
+      // If workflow metadata exists, delegate to WorkflowExecutor
+      if (plan.workflowMetadata) {
+        const cwd = project.directoryPath ?? this.config.PROJECT_ROOT;
+        const executor = new WorkflowExecutor();
+        await executor.execute(plan, project, ws, {
+          cwd,
+          handleNormalMode: (content, wsRef, proj, model) =>
+            this.handleNormalMode(content, wsRef, proj, model, 'plan'),
+        });
+        return;
       }
 
-      planManager.updatePlanStep(plan.id, step);
-      broadcast({ type: 'plan:step_updated', payload: { planId: plan.id, step } });
+      // Legacy sequential execution path
+      const executionOrder = this.buildExecutionOrder(plan.steps);
+      let allSucceeded = true;
 
-      if (step.status === 'failed') {
-        // Skip remaining dependent steps
-        break;
+      for (const step of executionOrder) {
+        step.status = 'in_progress';
+        planManager.updatePlanStep(plan.id, step);
+        broadcast({ type: 'plan:step_updated', payload: { planId: plan.id, step } });
+
+        try {
+          await this.handleNormalMode(
+            `[Plan Step ${step.id}] ${step.title}\n\n${step.description}`,
+            ws,
+            project,
+            'sonnet',
+            'plan',
+          );
+
+          step.status = 'completed';
+        } catch (err) {
+          logger.error({ err, stepId: step.id }, 'Plan step execution failed');
+          step.status = 'failed';
+          allSucceeded = false;
+        }
+
+        planManager.updatePlanStep(plan.id, step);
+        broadcast({ type: 'plan:step_updated', payload: { planId: plan.id, step } });
+
+        if (step.status === 'failed') {
+          break;
+        }
       }
+
+      const finalStatus = allSucceeded ? 'completed' : 'failed';
+      plan.status = finalStatus;
+      planManager.updatePlan(plan.id, { status: finalStatus });
+      broadcast({ type: 'plan:updated', payload: plan });
+    } catch (err) {
+      logger.error({ err, planId: plan.id }, 'Plan execution failed');
+      plan.status = 'failed';
+      planManager.updatePlan(plan.id, { status: 'failed' });
+      broadcast({ type: 'plan:updated', payload: plan });
+    } finally {
+      // Always signal completion if still marked executing
+      if (plan.status === 'executing') {
+        plan.status = 'failed';
+        planManager.updatePlan(plan.id, { status: 'failed' });
+        broadcast({ type: 'plan:updated', payload: plan });
+      }
+      broadcast({ type: 'plan:execution_completed', payload: { planId: plan.id, status: plan.status } });
     }
-
-    // Update plan final status
-    const finalStatus = allSucceeded ? 'completed' : 'failed';
-    plan.status = finalStatus;
-    planManager.updatePlan(plan.id, { status: finalStatus });
-    broadcast({ type: 'plan:updated', payload: plan });
-    broadcast({ type: 'plan:execution_completed', payload: { planId: plan.id, status: finalStatus } });
   }
 
   private buildExecutionOrder(steps: PlanStep[]): PlanStep[] {

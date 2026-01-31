@@ -4,8 +4,6 @@ import type { ContextBudget } from '@cloudscode/shared';
 type AuthType = 'oauth' | 'api_key' | 'none';
 
 interface SettingsState {
-  rightPanelOpen: boolean;
-  rightPanelTab: 'agents' | 'plans' | 'context' | 'memory';
   contextBudget: ContextBudget | null;
 
   // Project settings panel
@@ -14,14 +12,18 @@ interface SettingsState {
   // Agent detail panel
   agentDetailPanelOpen: boolean;
 
+  // Memory panel
+  memoryPanelOpen: boolean;
+
+  // Token stats panel
+  tokenStatsPanelOpen: boolean;
+
   // Auth state
   authenticated: boolean | null; // null = loading
   authType: AuthType;
   subscriptionType: string | null;
   settingsModalOpen: boolean;
 
-  toggleRightPanel: () => void;
-  setRightPanelTab: (tab: 'agents' | 'plans' | 'context' | 'memory') => void;
   setContextBudget: (budget: ContextBudget) => void;
 
   openProjectSettings: () => void;
@@ -29,6 +31,12 @@ interface SettingsState {
 
   openAgentDetailPanel: () => void;
   closeAgentDetailPanel: () => void;
+
+  openMemoryPanel: () => void;
+  closeMemoryPanel: () => void;
+
+  openTokenStatsPanel: () => void;
+  closeTokenStatsPanel: () => void;
 
   setAuthStatus: (status: {
     authenticated: boolean;
@@ -40,20 +48,18 @@ interface SettingsState {
 }
 
 export const useSettingsStore = create<SettingsState>((set) => ({
-  rightPanelOpen: true,
-  rightPanelTab: 'agents',
   contextBudget: null,
 
   projectSettingsOpen: false,
   agentDetailPanelOpen: false,
+  memoryPanelOpen: false,
+  tokenStatsPanelOpen: false,
 
   authenticated: null,
   authType: 'none',
   subscriptionType: null,
   settingsModalOpen: false,
 
-  toggleRightPanel: () => set((state) => ({ rightPanelOpen: !state.rightPanelOpen })),
-  setRightPanelTab: (tab) => set({ rightPanelTab: tab }),
   setContextBudget: (budget) => set({ contextBudget: budget }),
 
   openProjectSettings: () => set({ projectSettingsOpen: true }),
@@ -61,6 +67,12 @@ export const useSettingsStore = create<SettingsState>((set) => ({
 
   openAgentDetailPanel: () => set({ agentDetailPanelOpen: true }),
   closeAgentDetailPanel: () => set({ agentDetailPanelOpen: false }),
+
+  openMemoryPanel: () => set({ memoryPanelOpen: true }),
+  closeMemoryPanel: () => set({ memoryPanelOpen: false }),
+
+  openTokenStatsPanel: () => set({ tokenStatsPanelOpen: true }),
+  closeTokenStatsPanel: () => set({ tokenStatsPanelOpen: false }),
 
   setAuthStatus: ({ authenticated, authType, subscriptionType }) =>
     set({ authenticated, authType, subscriptionType }),

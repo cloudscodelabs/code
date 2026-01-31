@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Save, RefreshCw, Code, ChevronDown, ChevronRight, Bot } from 'lucide-react';
+import { Save, RefreshCw, Code, ChevronDown, ChevronRight, Bot, ArrowUpCircle, Lightbulb, Clock } from 'lucide-react';
 import { useProjectStore } from '../../stores/project-store.js';
 import { api } from '../../lib/api-client.js';
-import type { Project, ProjectMetadata, ProjectMetadataCategory } from '@cloudscode/shared';
+import type { Project, ProjectMetadata, ProjectMetadataCategory, MemoryEntry, MemoryCategory } from '@cloudscode/shared';
 
 type EditorTab = 'overview' | 'architecture' | 'structure' | 'services' | 'conventions' | 'roadmap' | 'ai';
 
@@ -25,6 +25,7 @@ export function ProjectEditor() {
   const [saving, setSaving] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [agentUpdated, setAgentUpdated] = useState(false);
+  const [relatedMemory, setRelatedMemory] = useState<MemoryEntry[]>([]);
   const agentUpdateTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const prevMetadataRef = useRef<string>('');
 
@@ -57,6 +58,21 @@ export function ProjectEditor() {
       if (isAgentUpdate) showAgentBanner();
     }
   }, [activeProject, saving, showAgentBanner]);
+
+  // Load related memory entries for cross-referencing
+  const workspaceId = useProjectStore((s) => s.workspaceId);
+  useEffect(() => {
+    if (!workspaceId || !activeProject) return;
+    const loadMemory = async () => {
+      try {
+        const { entries } = await api.listMemory(workspaceId, undefined, activeProject.id);
+        setRelatedMemory(entries);
+      } catch {
+        // ignore
+      }
+    };
+    loadMemory();
+  }, [workspaceId, activeProject]);
 
   if (!project) {
     return (
@@ -196,7 +212,7 @@ export function ProjectEditor() {
               <OverviewSection project={project} updateField={updateField} />
             )}
             {activeTab === 'architecture' && (
-              <ArchitectureSection metadata={metadata} updateMetadata={updateMetadata} project={project} updateField={updateField} />
+              <ArchitectureSection metadata={metadata} updateMetadata={updateMetadata} project={project} updateField={updateField} relatedMemory={relatedMemory.filter((e) => e.category === 'architecture')} />
             )}
             {activeTab === 'structure' && (
               <StructureSection metadata={metadata} updateMetadata={updateMetadata} />
@@ -205,7 +221,7 @@ export function ProjectEditor() {
               <ServicesSection metadata={metadata} updateMetadata={updateMetadata} />
             )}
             {activeTab === 'conventions' && (
-              <ConventionsSection metadata={metadata} updateMetadata={updateMetadata} />
+              <ConventionsSection metadata={metadata} updateMetadata={updateMetadata} relatedMemory={relatedMemory.filter((e) => e.category === 'convention')} />
             )}
             {activeTab === 'roadmap' && (
               <RoadmapSection metadata={metadata} updateMetadata={updateMetadata} />
@@ -318,11 +334,12 @@ function OverviewSection({ project, updateField }: { project: Project; updateFie
   );
 }
 
-function ArchitectureSection({ metadata, updateMetadata, project, updateField }: {
+function ArchitectureSection({ metadata, updateMetadata, project, updateField, relatedMemory = [] }: {
   metadata: ProjectMetadata;
   updateMetadata: (k: keyof ProjectMetadata, v: unknown) => void;
   project: Project;
   updateField: (f: keyof Project, v: unknown) => void;
+  relatedMemory?: MemoryEntry[];
 }) {
   return (
     <>
@@ -349,7 +366,7 @@ function ArchitectureSection({ metadata, updateMetadata, project, updateField }:
       </Field>
       <Section title="Tech Stack">
         <div className="text-xs text-zinc-500">
-          {metadata.techStack && metadata.techStack.length > 0 ? (
+          {Array.isArray(metadata.techStack) && metadata.techStack.length > 0 ? (
             <div className="space-y-1">
               {metadata.techStack.map((t, i) => (
                 <div key={i} className="flex items-center gap-2 text-zinc-300">
@@ -366,7 +383,7 @@ function ArchitectureSection({ metadata, updateMetadata, project, updateField }:
       </Section>
       <Section title="Design Patterns" defaultOpen={false}>
         <div className="text-xs text-zinc-500">
-          {metadata.designPatterns && metadata.designPatterns.length > 0 ? (
+          {Array.isArray(metadata.designPatterns) && metadata.designPatterns.length > 0 ? (
             <div className="space-y-1">
               {metadata.designPatterns.map((p, i) => (
                 <div key={i}>
@@ -379,6 +396,10 @@ function ArchitectureSection({ metadata, updateMetadata, project, updateField }:
           )}
         </div>
       </Section>
+      {/* Evolving Knowledge from Memory */}
+      {relatedMemory.length > 0 && (
+        <EvolvingKnowledgeSection entries={relatedMemory} projectUpdatedAt={project.updatedAt} />
+      )}
     </>
   );
 }
@@ -414,7 +435,7 @@ function StructureSection({ metadata, updateMetadata }: { metadata: ProjectMetad
       </Field>
       <Section title="Folder Mappings">
         <div className="text-xs text-zinc-500 space-y-1">
-          {metadata.folderMappings && metadata.folderMappings.length > 0 ? (
+          {Array.isArray(metadata.folderMappings) && metadata.folderMappings.length > 0 ? (
             metadata.folderMappings.map((f, i) => (
               <div key={i} className="flex items-center gap-2 text-zinc-300">
                 <code className="text-blue-400">{f.path}/</code>
@@ -428,7 +449,7 @@ function StructureSection({ metadata, updateMetadata }: { metadata: ProjectMetad
       </Section>
       <Section title="Entry Points" defaultOpen={false}>
         <div className="text-xs text-zinc-500 space-y-1">
-          {metadata.entryPoints && metadata.entryPoints.length > 0 ? (
+          {Array.isArray(metadata.entryPoints) && metadata.entryPoints.length > 0 ? (
             metadata.entryPoints.map((e, i) => (
               <div key={i} className="flex items-center gap-2 text-zinc-300">
                 <code className="text-blue-400">{e.path}</code>
@@ -449,7 +470,7 @@ function ServicesSection({ metadata, updateMetadata }: { metadata: ProjectMetada
     <>
       <Section title="Services">
         <div className="text-xs text-zinc-500">
-          {metadata.services && metadata.services.length > 0 ? (
+          {Array.isArray(metadata.services) && metadata.services.length > 0 ? (
             <div className="space-y-1">
               {metadata.services.map((s, i) => (
                 <div key={i} className="text-zinc-300">
@@ -466,7 +487,7 @@ function ServicesSection({ metadata, updateMetadata }: { metadata: ProjectMetada
       </Section>
       <Section title="Databases" defaultOpen={false}>
         <div className="text-xs text-zinc-500">
-          {metadata.databases && metadata.databases.length > 0 ? (
+          {Array.isArray(metadata.databases) && metadata.databases.length > 0 ? (
             metadata.databases.map((d, i) => (
               <div key={i} className="text-zinc-300">
                 {d.name} ({d.type})
@@ -479,7 +500,7 @@ function ServicesSection({ metadata, updateMetadata }: { metadata: ProjectMetada
       </Section>
       <Section title="Environments" defaultOpen={false}>
         <div className="text-xs text-zinc-500">
-          {metadata.environments && metadata.environments.length > 0 ? (
+          {Array.isArray(metadata.environments) && metadata.environments.length > 0 ? (
             metadata.environments.map((e, i) => (
               <div key={i} className="text-zinc-300">
                 {e.name} {e.url && <span className="text-zinc-500">({e.url})</span>}
@@ -494,12 +515,16 @@ function ServicesSection({ metadata, updateMetadata }: { metadata: ProjectMetada
   );
 }
 
-function ConventionsSection({ metadata, updateMetadata }: { metadata: ProjectMetadata; updateMetadata: (k: keyof ProjectMetadata, v: unknown) => void }) {
+function ConventionsSection({ metadata, updateMetadata, relatedMemory = [] }: {
+  metadata: ProjectMetadata;
+  updateMetadata: (k: keyof ProjectMetadata, v: unknown) => void;
+  relatedMemory?: MemoryEntry[];
+}) {
   return (
     <>
       <Section title="Naming Conventions">
         <div className="text-xs text-zinc-500">
-          {metadata.namingConventions && metadata.namingConventions.length > 0 ? (
+          {Array.isArray(metadata.namingConventions) && metadata.namingConventions.length > 0 ? (
             metadata.namingConventions.map((n, i) => (
               <div key={i} className="text-zinc-300">
                 <span className="font-medium">{n.target}</span>: {n.pattern}
@@ -513,7 +538,7 @@ function ConventionsSection({ metadata, updateMetadata }: { metadata: ProjectMet
       </Section>
       <Section title="Coding Standards">
         <div className="text-xs text-zinc-500">
-          {metadata.codingStandards && metadata.codingStandards.length > 0 ? (
+          {Array.isArray(metadata.codingStandards) && metadata.codingStandards.length > 0 ? (
             metadata.codingStandards.map((s, i) => (
               <div key={i} className="text-zinc-300">
                 <span className="font-medium">{s.rule}</span>: {s.description}
@@ -526,7 +551,7 @@ function ConventionsSection({ metadata, updateMetadata }: { metadata: ProjectMet
       </Section>
       <Section title="Error Handling" defaultOpen={false}>
         <div className="text-xs text-zinc-500">
-          {metadata.errorHandling && metadata.errorHandling.length > 0 ? (
+          {Array.isArray(metadata.errorHandling) && metadata.errorHandling.length > 0 ? (
             metadata.errorHandling.map((e, i) => (
               <div key={i} className="text-zinc-300">
                 <span className="font-medium">{e.context}</span>: {e.pattern}
@@ -549,6 +574,10 @@ function ConventionsSection({ metadata, updateMetadata }: { metadata: ProjectMet
           )}
         </div>
       </Section>
+      {/* Evolving Knowledge from Memory */}
+      {relatedMemory.length > 0 && (
+        <EvolvingKnowledgeSection entries={relatedMemory} projectUpdatedAt={0} />
+      )}
     </>
   );
 }
@@ -557,7 +586,7 @@ function RoadmapSection({ metadata, updateMetadata }: { metadata: ProjectMetadat
   return (
     <Section title="Roadmap Items">
       <div className="text-xs text-zinc-500">
-        {metadata.roadmap && metadata.roadmap.length > 0 ? (
+        {Array.isArray(metadata.roadmap) && metadata.roadmap.length > 0 ? (
           <div className="space-y-2">
             {metadata.roadmap.map((item, i) => (
               <div key={i} className="p-2 rounded bg-zinc-900 border border-zinc-800">
@@ -581,6 +610,45 @@ function RoadmapSection({ metadata, updateMetadata }: { metadata: ProjectMetadat
         ) : (
           'No roadmap items. Add milestones, epics, and features to track progress.'
         )}
+      </div>
+    </Section>
+  );
+}
+
+function EvolvingKnowledgeSection({ entries, projectUpdatedAt }: { entries: MemoryEntry[]; projectUpdatedAt: number }) {
+  if (entries.length === 0) return null;
+
+  return (
+    <Section title="Evolving Knowledge" defaultOpen={true}>
+      <div className="space-y-2">
+        <div className="text-[10px] text-zinc-600 flex items-center gap-1">
+          <Lightbulb size={10} />
+          Memory entries related to this category. Newer entries may supersede settled settings.
+        </div>
+        {entries.map((entry) => (
+          <div
+            key={entry.id}
+            className="p-2 rounded bg-zinc-800/50 border border-zinc-700/50"
+          >
+            <div className="flex items-center gap-2 mb-0.5">
+              <span className="text-xs font-medium text-zinc-300 flex-1 truncate">
+                {entry.key}
+              </span>
+              {entry.updatedAt > projectUpdatedAt && projectUpdatedAt > 0 && (
+                <span className="flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] rounded text-amber-400 bg-amber-400/10">
+                  <Clock size={8} />
+                  Newer
+                </span>
+              )}
+              {entry.promotedTo && (
+                <span className="flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] rounded text-green-400 bg-green-400/10">
+                  Promoted
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-zinc-500 leading-relaxed">{entry.content}</p>
+          </div>
+        ))}
       </div>
     </Section>
   );

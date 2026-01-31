@@ -1,0 +1,25 @@
+{
+  "name": "@cloudscode/electron",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc && tsc -p tsconfig.preload.json",
+    "dev": "tsc && tsc -p tsconfig.preload.json && electron --no-sandbox dist/main.js",
+    "start": "electron dist/main.js",
+    "rebuild-native": "electron-rebuild -f -w better-sqlite3 -m ../..",
+    "rebuild-native:node": "cd ../.. && npm rebuild better-sqlite3",
+    "dist": "electron-builder",
+    "clean": "rm -rf dist release"
+  },
+  "dependencies": {
+    "@cloudscode/server": "workspace:*"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^3.7.0",
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.0",
+    "typescript": "^5.7.0"
+  }
+}

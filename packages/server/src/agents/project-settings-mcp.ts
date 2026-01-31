@@ -2,6 +2,7 @@ import { createSdkMcpServer, tool } from '@anthropic-ai/claude-code';
 import { z } from 'zod';
 import type { Project, ProjectMetadata, ProjectMetadataCategory } from '@cloudscode/shared';
 import { getProjectManager } from '../projects/project-manager.js';
+import { getMemoryStore } from '../context/memory-store.js';
 import { broadcast } from '../ws.js';
 import { logger } from '../logger.js';
 import {
@@ -9,6 +10,7 @@ import {
   cloneRepository,
   validateExistingDirectory,
 } from '../projects/directory-manager.js';
+import { OVERLAPPING_SETTINGS_CATEGORIES, settingsCategoryToMemoryCategory } from './knowledge-dedup.js';
 
 // ---------------------------------------------------------------------------
 // Identifier fields used for smart-matching array items
@@ -207,7 +209,7 @@ export function createProjectSettingsMcpServer(projectId: string) {
       // ----- Tool 2: update_project_settings -----
       tool(
         'update_project_settings',
-        'Update a specific project metadata category. Supports smart merging (arrays matched by name/id), replacing, or removing items.',
+        'Update a specific project metadata category. Supports smart merging (arrays matched by name/id), replacing, or removing items. After setup is completed, overlapping categories (codingStandards, designPatterns, errorHandling, namingConventions, knownIssues, adrs, domainConcepts) are redirected to memory entries instead.',
         {
           category: z.string().describe(
             'Metadata category to update (e.g. "techStack", "git", "services", "packageManager", "codingStandards", "tags", "ai", "testing", "linting", "logging", "security").',
@@ -223,6 +225,36 @@ export function createProjectSettingsMcpServer(projectId: string) {
           try {
             const pm = getProjectManager();
             const cat = category as ProjectMetadataCategory;
+            const project = pm.getProject(projectId);
+
+            // After setup is completed, redirect overlapping categories to memory
+            if (project?.setupCompleted && OVERLAPPING_SETTINGS_CATEGORIES.has(cat)) {
+              const memoryCategory = settingsCategoryToMemoryCategory(cat);
+              if (memoryCategory) {
+                const memoryStore = getMemoryStore();
+                const key = `${category}: ${typeof data === 'object' ? JSON.stringify(data) : String(data)}`.slice(0, 100);
+                const content = typeof data === 'object' ? JSON.stringify(data, null, 2) : String(data);
+                const entry = memoryStore.create(
+                  project.workspaceId,
+                  {
+                    category: memoryCategory,
+                    key,
+                    content: `[From settings update - ${category}] ${content}`,
+                    scope: 'project',
+                  },
+                  projectId,
+                );
+                broadcast({ type: 'memory:updated', payload: { entry, action: 'created' } });
+
+                return {
+                  content: [{
+                    type: 'text' as const,
+                    text: `Setup is completed. The "${category}" category is now stable. Created a memory entry (${memoryCategory}) instead: "${key}". If this knowledge stabilizes, it can be promoted to settings.`,
+                  }],
+                };
+              }
+            }
+
             const currentMeta = pm.getProjectMetadata(projectId) as ProjectMetadata;
             const currentValue = currentMeta[cat];
 
@@ -232,7 +264,12 @@ export function createProjectSettingsMcpServer(projectId: string) {
                 newValue = smartMerge(currentValue, data, cat);
                 break;
               case 'replace':
-                newValue = data;
+                // Ensure array categories always store arrays
+                if (ARRAY_CATEGORIES.has(cat) && data != null && !Array.isArray(data)) {
+                  newValue = [data];
+                } else {
+                  newValue = data;
+                }
                 break;
               case 'remove':
                 newValue = smartRemove(currentValue, data, cat);

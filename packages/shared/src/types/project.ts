@@ -609,6 +609,7 @@ export interface StoredMessage {
   content: string;
   agentId: string | null;
   channel?: 'chat' | 'setup' | 'plan';
+  planSessionId?: string | null;
   createdAt: number;
 }
 

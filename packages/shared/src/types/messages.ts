@@ -3,6 +3,7 @@ import type { ProjectListItem, Project, ProjectMetadata, StoredMessage } from '.
 import type { ContextBudget } from './context.js';
 import type { MemoryEntry } from './memory.js';
 import type { Plan, PlanStep, PlanListItem } from './plan.js';
+import type { QualityGateResult } from './workflow.js';
 
 // Client → Server messages
 export type ClientMessage =
@@ -17,7 +18,10 @@ export type ClientMessage =
   | PlanApproveMessage
   | PlanSaveMessage
   | PlanCancelMessage
-  | PlanExecuteMessage;
+  | PlanExecuteMessage
+  | WorkflowCreateMessage
+  | WorkflowResumeMessage
+  | WorkflowRollbackMessage;
 
 export interface ChatSendMessage {
   type: 'chat:send';
@@ -61,6 +65,7 @@ export interface PlanSendMessage {
   payload: {
     content: string;
     model?: string;
+    planSessionId?: string;
   };
 }
 
@@ -85,6 +90,30 @@ export interface PlanCancelMessage {
 
 export interface PlanExecuteMessage {
   type: 'plan:execute';
+  payload: {
+    planId: string;
+  };
+}
+
+export interface WorkflowCreateMessage {
+  type: 'workflow:create';
+  payload: {
+    projectId: string;
+    templateId: string;
+    userMessage: string;
+    customTitle?: string;
+  };
+}
+
+export interface WorkflowResumeMessage {
+  type: 'workflow:resume';
+  payload: {
+    planId: string;
+  };
+}
+
+export interface WorkflowRollbackMessage {
+  type: 'workflow:rollback';
   payload: {
     planId: string;
   };
@@ -116,7 +145,11 @@ export type ServerMessage =
   | PlanExecutionCompletedMessage
   | PlanSavedMessage
   | PlanListMessage
-  | ProjectPlanMessagesMessage;
+  | ProjectPlanMessagesMessage
+  | WorkflowSuggestionMessage
+  | WorkflowCheckpointMessage
+  | WorkflowQualityGateMessage
+  | WorkflowRollbackCompletedMessage;
 
 export interface ChatTokenMessage {
   type: 'chat:token';
@@ -235,6 +268,7 @@ export interface ProjectPlanMessagesMessage {
   payload: {
     projectId: string;
     messages: StoredMessage[];
+    planSessionId?: string;
   };
 }
 
@@ -302,6 +336,43 @@ export interface PlanListMessage {
   payload: {
     projectId: string;
     plans: PlanListItem[];
+  };
+}
+
+// Workflow messages (server → client)
+export interface WorkflowSuggestionMessage {
+  type: 'workflow:suggestion';
+  payload: {
+    projectId: string;
+    templateId: string;
+    templateName: string;
+    confidence: number;
+    reasoning: string;
+  };
+}
+
+export interface WorkflowCheckpointMessage {
+  type: 'workflow:checkpoint';
+  payload: {
+    planId: string;
+    stepId: string;
+  };
+}
+
+export interface WorkflowQualityGateMessage {
+  type: 'workflow:quality_gate';
+  payload: {
+    planId: string;
+    stepId: string;
+    result: QualityGateResult;
+  };
+}
+
+export interface WorkflowRollbackCompletedMessage {
+  type: 'workflow:rollback_completed';
+  payload: {
+    planId: string;
+    success: boolean;
   };
 }
 

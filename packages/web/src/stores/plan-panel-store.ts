@@ -2,8 +2,11 @@ import { create } from 'zustand';
 import type { Plan, PlanStep, AgentNode, AgentToolActivity } from '@cloudscode/shared';
 import type { ChatMessage } from './chat-store.js';
 
+type PlanPanelView = 'list' | 'detail' | 'create';
+
 interface PlanPanelState {
   isOpen: boolean;
+  view: PlanPanelView;
   currentPlan: Plan | null;
   isExecuting: boolean;
 
@@ -22,6 +25,8 @@ interface PlanPanelState {
   closePanel: () => void;
   togglePanel: () => void;
   reset: () => void;
+  setView: (view: PlanPanelView) => void;
+  openCreateView: () => void;
 
   // Actions — plan
   setPlan: (plan: Plan) => void;
@@ -50,6 +55,7 @@ let planMessageCounter = 0;
 
 export const usePlanPanelStore = create<PlanPanelState>((set) => ({
   isOpen: false,
+  view: 'list' as PlanPanelView,
   currentPlan: null,
   isExecuting: false,
   messages: [],
@@ -59,15 +65,30 @@ export const usePlanPanelStore = create<PlanPanelState>((set) => ({
   planAgents: new Map(),
   planToolActivity: [],
 
-  openPanel: () => set({ isOpen: true }),
-  closePanel: () => set({ isOpen: false }),
-  togglePanel: () => set((state) => ({ isOpen: !state.isOpen })),
+  openPanel: () => set({ isOpen: true, view: 'list' }),
+  closePanel: () => set({ isOpen: false, view: 'list' }),
+  togglePanel: () => set((state) => ({ isOpen: !state.isOpen, ...(state.isOpen ? { view: 'list' as PlanPanelView } : {}) })),
 
   reset: () =>
     set({
       isOpen: false,
+      view: 'list' as PlanPanelView,
       currentPlan: null,
       isExecuting: false,
+      messages: [],
+      streamingContent: '',
+      isStreaming: false,
+      error: null,
+      planAgents: new Map(),
+      planToolActivity: [],
+    }),
+
+  setView: (view) => set({ view }),
+
+  openCreateView: () =>
+    set({
+      view: 'create' as PlanPanelView,
+      currentPlan: null,
       messages: [],
       streamingContent: '',
       isStreaming: false,

@@ -1,4 +1,4 @@
-import type { Plan, PlanStep, PlanListItem } from '@cloudscode/shared';
+import type { Plan, PlanStep, PlanListItem, WorkflowMetadata } from '@cloudscode/shared';
 import { getDb } from '../db/database.js';
 import { generateId, nowUnix } from '@cloudscode/shared';
 import { logger } from '../logger.js';
@@ -16,8 +16,8 @@ class PlanManager {
     };
 
     db.prepare(
-      `INSERT INTO plans (id, project_id, title, summary, steps, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO plans (id, project_id, title, summary, steps, status, created_at, updated_at, workflow_metadata, plan_session_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       fullPlan.id,
       fullPlan.projectId,
@@ -27,6 +27,8 @@ class PlanManager {
       fullPlan.status,
       fullPlan.createdAt,
       fullPlan.updatedAt,
+      fullPlan.workflowMetadata ? JSON.stringify(fullPlan.workflowMetadata) : null,
+      fullPlan.planSessionId ?? null,
     );
 
     logger.info({ planId: fullPlan.id, projectId: fullPlan.projectId }, 'Plan created');
@@ -58,11 +60,12 @@ class PlanManager {
         completedStepCount: steps.filter((s) => s.status === 'completed').length,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
+        planSessionId: row.plan_session_id ?? null,
       };
     });
   }
 
-  updatePlan(id: string, updates: Partial<Pick<Plan, 'title' | 'summary' | 'steps' | 'status'>>): void {
+  updatePlan(id: string, updates: Partial<Pick<Plan, 'title' | 'summary' | 'steps' | 'status' | 'workflowMetadata'>>): void {
     const db = getDb();
     const sets: string[] = ['updated_at = ?'];
     const values: unknown[] = [nowUnix()];
@@ -82,6 +85,10 @@ class PlanManager {
     if (updates.status !== undefined) {
       sets.push('status = ?');
       values.push(updates.status);
+    }
+    if (updates.workflowMetadata !== undefined) {
+      sets.push('workflow_metadata = ?');
+      values.push(JSON.stringify(updates.workflowMetadata));
     }
 
     values.push(id);
@@ -104,7 +111,7 @@ class PlanManager {
   }
 
   private rowToPlan(row: any): Plan {
-    return {
+    const plan: Plan = {
       id: row.id,
       projectId: row.project_id,
       title: row.title,
@@ -113,7 +120,12 @@ class PlanManager {
       status: row.status,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
+      planSessionId: row.plan_session_id ?? null,
     };
+    if (row.workflow_metadata) {
+      plan.workflowMetadata = JSON.parse(row.workflow_metadata);
+    }
+    return plan;
   }
 }
 

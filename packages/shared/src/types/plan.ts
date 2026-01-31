@@ -1,3 +1,5 @@
+import type { QualityGate, WorkflowMetadata } from './workflow.js';
+
 export type PlanStepStatus = 'pending' | 'in_progress' | 'completed' | 'failed' | 'skipped';
 export type PlanStatus = 'drafting' | 'ready' | 'executing' | 'completed' | 'failed' | 'cancelled';
 
@@ -9,6 +11,8 @@ export interface PlanStep {
   status: PlanStepStatus;
   dependencies?: string[];
   estimatedComplexity?: 'low' | 'medium' | 'high';
+  qualityGate?: QualityGate;
+  resultSummary?: string;
 }
 
 export interface Plan {
@@ -20,6 +24,8 @@ export interface Plan {
   status: PlanStatus;
   createdAt: number;
   updatedAt: number;
+  workflowMetadata?: WorkflowMetadata;
+  planSessionId?: string | null;
 }
 
 export interface PlanListItem {
@@ -32,4 +38,5 @@ export interface PlanListItem {
   completedStepCount: number;
   createdAt: number;
   updatedAt: number;
+  planSessionId?: string | null;
 }

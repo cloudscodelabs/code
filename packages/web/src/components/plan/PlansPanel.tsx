@@ -1,14 +1,12 @@
 import { useState, useEffect, useCallback } from 'react';
 import { usePlanPanelStore } from '../../stores/plan-panel-store.js';
 import { wsClient } from '../../lib/ws-client.js';
-import { PlanPanelHeader } from './PlanPanelHeader.js';
-import { PlanAgentActivity } from './PlanAgentActivity.js';
-import { PlanStepsPanel } from './PlanStepsPanel.js';
-import { PlanChatArea } from './PlanChatArea.js';
+import { PlansPanelHeader } from './PlansPanelHeader.js';
+import { PlansPanelBody } from './PlansPanelBody.js';
 
-export function PlanModePanel() {
+export function PlansPanel() {
   const isOpen = usePlanPanelStore((s) => s.isOpen);
-  const currentPlan = usePlanPanelStore((s) => s.currentPlan);
+  const isStreaming = usePlanPanelStore((s) => s.isStreaming);
 
   const [mounted, setMounted] = useState(false);
   const [visible, setVisible] = useState(false);
@@ -30,9 +28,11 @@ export function PlanModePanel() {
   }, [isOpen, mounted]);
 
   const handleClose = useCallback(() => {
-    wsClient.send({ type: 'plan:interrupt' });
+    if (isStreaming) {
+      wsClient.send({ type: 'plan:interrupt' });
+    }
     usePlanPanelStore.getState().closePanel();
-  }, []);
+  }, [isStreaming]);
 
   // Close on Escape
   const handleKeyDown = useCallback(
@@ -52,24 +52,23 @@ export function PlanModePanel() {
   if (!mounted) return null;
 
   return (
-    <div className="fixed inset-0 z-50">
+    <div className="fixed inset-0 z-40">
       {/* Backdrop */}
       <div
         className={`absolute inset-0 bg-black/50 transition-opacity duration-300 ${
           visible ? 'opacity-100' : 'opacity-0'
         }`}
+        onClick={handleClose}
       />
 
-      {/* Panel — slides from left */}
+      {/* Panel — slides from right */}
       <div
-        className={`absolute top-0 left-0 bottom-0 w-[600px] max-w-[80vw] bg-zinc-900 border-r border-zinc-700 flex flex-col transition-transform duration-300 ease-out ${
-          visible ? 'translate-x-0' : '-translate-x-full'
+        className={`absolute top-0 right-0 bottom-0 w-full max-w-4xl bg-zinc-900 border-l border-zinc-700 flex flex-col transition-transform duration-300 ease-out ${
+          visible ? 'translate-x-0' : 'translate-x-full'
         }`}
       >
-        <PlanPanelHeader onClose={handleClose} />
-        <PlanAgentActivity />
-        {currentPlan && <PlanStepsPanel />}
-        <PlanChatArea />
+        <PlansPanelHeader onClose={handleClose} />
+        <PlansPanelBody />
       </div>
     </div>
   );

@@ -1,4 +1,4 @@
-import { X, Play, Save, Ban } from 'lucide-react';
+import { X, Play, Save, Ban, RotateCcw, RefreshCw } from 'lucide-react';
 import { usePlanPanelStore } from '../../stores/plan-panel-store.js';
 import { wsClient } from '../../lib/ws-client.js';
 
@@ -28,19 +28,60 @@ export function PlanPanelHeader({ onClose }: PlanPanelHeaderProps) {
     usePlanPanelStore.getState().closePanel();
   };
 
+  const handleResume = () => {
+    if (!currentPlan) return;
+    wsClient.send({
+      type: 'workflow:resume',
+      payload: { planId: currentPlan.id },
+    });
+  };
+
+  const handleRollback = () => {
+    if (!currentPlan) return;
+    wsClient.send({
+      type: 'workflow:rollback',
+      payload: { planId: currentPlan.id },
+    });
+  };
+
   const showApprove = currentPlan && currentPlan.status === 'ready' && !isExecuting;
   const showSave = currentPlan && !isExecuting;
+  const isWorkflow = currentPlan?.workflowMetadata != null;
+  const showResume = isWorkflow && currentPlan?.status === 'failed' && !isExecuting && currentPlan.workflowMetadata?.checkpointStepId;
+  const showRollback = isWorkflow && !isExecuting && currentPlan?.workflowMetadata?.rollbackInfo?.gitCommitBefore;
 
   return (
     <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-700">
       <div>
-        <h2 className="text-sm font-medium text-zinc-100">Plan Mode</h2>
+        <h2 className="text-sm font-medium text-zinc-100">
+          {isWorkflow ? 'Workflow Mode' : 'Plan Mode'}
+        </h2>
         <p className="text-xs text-zinc-500">
-          {isExecuting ? 'Executing plan...' : 'Collaborate to create an execution plan'}
+          {isExecuting ? 'Executing plan...' : isWorkflow ? currentPlan?.workflowMetadata?.templateName ?? 'Workflow' : 'Collaborate to create an execution plan'}
         </p>
       </div>
 
       <div className="flex items-center gap-2">
+        {showResume && (
+          <button
+            onClick={handleResume}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium bg-amber-600 hover:bg-amber-500 text-white transition-colors"
+          >
+            <RefreshCw size={12} />
+            Resume
+          </button>
+        )}
+
+        {showRollback && (
+          <button
+            onClick={handleRollback}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium bg-red-700 hover:bg-red-600 text-white transition-colors"
+          >
+            <RotateCcw size={12} />
+            Rollback
+          </button>
+        )}
+
         {showApprove && (
           <button
             onClick={handleApproveExecute}

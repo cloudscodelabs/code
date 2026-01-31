@@ -62,6 +62,23 @@ export const api = {
   deleteMemory: (id: string) =>
     request<any>(`/memory/${id}`, { method: 'DELETE' }),
 
+  // Promotion
+  previewPromotion: (memoryId: string, projectId: string) =>
+    request<any>(`/promotion/${memoryId}/promote`, {
+      method: 'POST',
+      body: JSON.stringify({ projectId, preview: true }),
+    }),
+  promoteMemory: (memoryId: string, projectId: string) =>
+    request<any>(`/promotion/${memoryId}/promote`, {
+      method: 'POST',
+      body: JSON.stringify({ projectId }),
+    }),
+  getPromotionSuggestions: (workspaceId: string, projectId?: string) => {
+    let url = `/promotion/suggestions?workspaceId=${workspaceId}`;
+    if (projectId) url += `&projectId=${projectId}`;
+    return request<{ suggestions: any[] }>(url);
+  },
+
   // Context
   getContext: (projectId: string) => request<any>(`/context/${projectId}`),
 
@@ -96,6 +113,28 @@ export const api = {
   getPlan: (id: string) => request<any>(`/plans/${id}`),
   deletePlan: (id: string) =>
     request<any>(`/plans/${id}`, { method: 'DELETE' }),
+
+  // Workflows
+  listWorkflowTemplates: (projectId: string) =>
+    request<{ templates: any[] }>(`/workflows/templates?projectId=${projectId}`),
+  getWorkflowTemplate: (id: string) => request<any>(`/workflows/templates/${id}`),
+  createWorkflowTemplate: (projectId: string, input: { name: string; description: string; category: string; steps: any[] }) =>
+    request<any>('/workflows/templates', {
+      method: 'POST',
+      body: JSON.stringify({ projectId, ...input }),
+    }),
+  updateWorkflowTemplate: (id: string, input: Partial<{ name: string; description: string; category: string; steps: any[] }>) =>
+    request<any>(`/workflows/templates/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(input),
+    }),
+  deleteWorkflowTemplate: (id: string) =>
+    request<any>(`/workflows/templates/${id}`, { method: 'DELETE' }),
+  createWorkflowPlan: (projectId: string, templateId: string, userMessage: string, customTitle?: string) =>
+    request<any>('/workflows/create', {
+      method: 'POST',
+      body: JSON.stringify({ projectId, templateId, userMessage, customTitle }),
+    }),
 
   // Projects root directory
   getProjectsRootDir: () =>

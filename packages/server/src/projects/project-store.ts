@@ -175,7 +175,7 @@ export class ProjectStore {
     );
   }
 
-  addMessage(projectId: string, role: string, content: string, agentId?: string, channel?: 'chat' | 'setup' | 'plan'): StoredMessage {
+  addMessage(projectId: string, role: string, content: string, agentId?: string, channel?: 'chat' | 'setup' | 'plan', planSessionId?: string): StoredMessage {
     const db = getDb();
     const msg: StoredMessage = {
       id: generateId(),
@@ -184,11 +184,12 @@ export class ProjectStore {
       content,
       agentId: agentId ?? null,
       channel: channel ?? 'chat',
+      planSessionId: planSessionId ?? null,
       createdAt: nowUnix(),
     };
     db.prepare(
-      'INSERT INTO messages (id, project_id, role, content, agent_id, channel, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-    ).run(msg.id, msg.projectId, msg.role, msg.content, msg.agentId, msg.channel, msg.createdAt);
+      'INSERT INTO messages (id, project_id, role, content, agent_id, channel, plan_session_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    ).run(msg.id, msg.projectId, msg.role, msg.content, msg.agentId, msg.channel, msg.planSessionId, msg.createdAt);
     return msg;
   }
 
@@ -210,8 +211,23 @@ export class ProjectStore {
     return rows.reverse().map((r) => this.rowToMessage(r));
   }
 
-  getPlanMessages(projectId: string): StoredMessage[] {
+  getPlanMessages(projectId: string, planSessionId?: string): StoredMessage[] {
+    if (planSessionId) {
+      const db = getDb();
+      const rows = db.prepare(
+        'SELECT * FROM messages WHERE project_id = ? AND channel = ? AND plan_session_id = ? ORDER BY created_at ASC',
+      ).all(projectId, 'plan', planSessionId) as any[];
+      return rows.map((r) => this.rowToMessage(r));
+    }
     return this.getMessages(projectId, 'plan');
+  }
+
+  getRecentPlanMessages(projectId: string, planSessionId: string, limit: number = 20): StoredMessage[] {
+    const db = getDb();
+    const rows = db.prepare(
+      'SELECT * FROM messages WHERE project_id = ? AND channel = ? AND plan_session_id = ? ORDER BY created_at DESC LIMIT ?',
+    ).all(projectId, 'plan', planSessionId, limit) as any[];
+    return rows.reverse().map((r) => this.rowToMessage(r));
   }
 
   private rowToMessage(r: any): StoredMessage {
@@ -222,6 +238,7 @@ export class ProjectStore {
       content: r.content,
       agentId: r.agent_id,
       channel: r.channel ?? 'chat',
+      planSessionId: r.plan_session_id ?? null,
       createdAt: r.created_at,
     };
   }

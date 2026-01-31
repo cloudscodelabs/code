@@ -17,17 +17,18 @@ class MemoryStore {
       scope,
       confidence: 1.0,
       useCount: 0,
+      promotedTo: null,
       createdAt: nowUnix(),
       updatedAt: nowUnix(),
     };
 
     db.prepare(`
-      INSERT INTO memory_entries (id, workspace_id, category, key, content, source_project_id, scope, confidence, use_count, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO memory_entries (id, workspace_id, category, key, content, source_project_id, scope, confidence, use_count, promoted_to, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       entry.id, entry.workspaceId, entry.category, entry.key,
       entry.content, entry.sourceProjectId, entry.scope, entry.confidence,
-      entry.useCount, entry.createdAt, entry.updatedAt,
+      entry.useCount, entry.promotedTo, entry.createdAt, entry.updatedAt,
     );
 
     logger.info({ id: entry.id, category: entry.category, key: entry.key, scope: entry.scope }, 'Memory entry created');
@@ -198,6 +199,39 @@ class MemoryStore {
     return parts.join('\n');
   }
 
+  markPromoted(id: string, promotedTo: string): MemoryEntry | null {
+    const db = getDb();
+    db.prepare('UPDATE memory_entries SET promoted_to = ?, updated_at = ? WHERE id = ?')
+      .run(promotedTo, nowUnix(), id);
+    return this.get(id);
+  }
+
+  listPromotionCandidates(workspaceId: string, projectId?: string, limit: number = 20): MemoryEntry[] {
+    const db = getDb();
+    // High confidence, frequently used, not yet promoted entries in overlapping categories
+    const overlappingCategories = ['convention', 'architecture', 'decision', 'fact', 'issue'];
+    const placeholders = overlappingCategories.map(() => '?').join(', ');
+
+    if (projectId) {
+      return (db.prepare(`
+        SELECT * FROM memory_entries
+        WHERE workspace_id = ? AND promoted_to IS NULL
+          AND category IN (${placeholders})
+          AND (scope = 'workspace' OR (scope = 'project' AND source_project_id = ?))
+        ORDER BY use_count DESC, confidence DESC, updated_at DESC
+        LIMIT ?
+      `).all(workspaceId, ...overlappingCategories, projectId, limit) as any[]).map(this.rowToEntry);
+    }
+
+    return (db.prepare(`
+      SELECT * FROM memory_entries
+      WHERE workspace_id = ? AND promoted_to IS NULL
+        AND category IN (${placeholders})
+      ORDER BY use_count DESC, confidence DESC, updated_at DESC
+      LIMIT ?
+    `).all(workspaceId, ...overlappingCategories, limit) as any[]).map(this.rowToEntry);
+  }
+
   private rowToEntry(row: any): MemoryEntry {
     return {
       id: row.id,
@@ -209,6 +243,7 @@ class MemoryStore {
       scope: (row.scope ?? 'workspace') as MemoryScope,
       confidence: row.confidence,
       useCount: row.use_count,
+      promotedTo: row.promoted_to ?? null,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };

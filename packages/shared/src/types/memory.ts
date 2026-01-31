@@ -12,6 +12,7 @@ export interface MemoryEntry {
   scope: MemoryScope;
   confidence: number;
   useCount: number;
+  promotedTo: string | null;
   createdAt: number;
   updatedAt: number;
 }

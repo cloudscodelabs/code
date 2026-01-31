@@ -6,17 +6,21 @@ export function ContextDashboard() {
 
   if (!budget) {
     return (
-      <div className="p-4 text-sm text-zinc-500">
+      <div className="p-6 text-sm text-zinc-500">
         No context data yet. Send a message to start tracking.
       </div>
     );
   }
 
+  const totalAllTokens = budget.inputTokens + budget.outputTokens + budget.cacheReadTokens + budget.cacheWriteTokens;
+  const pct = (v: number) => totalAllTokens > 0 ? ((v / totalAllTokens) * 100).toFixed(1) : '0.0';
+
   return (
-    <div className="p-4 space-y-4">
+    <div className="p-6 space-y-6">
+      {/* Summary */}
       <div>
-        <h3 className="text-xs font-medium text-zinc-500 uppercase tracking-wide mb-2">
-          Token Usage
+        <h3 className="text-xs font-medium text-zinc-500 uppercase tracking-wide mb-3">
+          Summary
         </h3>
         <BudgetMeter
           label="Total Tokens"
@@ -32,30 +36,72 @@ export function ContextDashboard() {
         />
       </div>
 
-      <div className="space-y-2">
-        <h3 className="text-xs font-medium text-zinc-500 uppercase tracking-wide">
-          Breakdown
+      {/* Token Breakdown */}
+      <div>
+        <h3 className="text-xs font-medium text-zinc-500 uppercase tracking-wide mb-3">
+          Token Breakdown
         </h3>
-        <div className="grid grid-cols-2 gap-2 text-xs">
-          <Stat label="Input" value={budget.inputTokens.toLocaleString()} />
-          <Stat label="Output" value={budget.outputTokens.toLocaleString()} />
-          <Stat label="Cache Read" value={budget.cacheReadTokens.toLocaleString()} />
-          <Stat label="Cache Write" value={budget.cacheWriteTokens.toLocaleString()} />
+        <div className="grid grid-cols-2 gap-3">
+          <TokenStat
+            label="Input"
+            value={budget.inputTokens}
+            percentage={pct(budget.inputTokens)}
+            color="text-blue-400"
+          />
+          <TokenStat
+            label="Output"
+            value={budget.outputTokens}
+            percentage={pct(budget.outputTokens)}
+            color="text-green-400"
+          />
+          <TokenStat
+            label="Cache Read"
+            value={budget.cacheReadTokens}
+            percentage={pct(budget.cacheReadTokens)}
+            color="text-amber-400"
+          />
+          <TokenStat
+            label="Cache Write"
+            value={budget.cacheWriteTokens}
+            percentage={pct(budget.cacheWriteTokens)}
+            color="text-purple-400"
+          />
         </div>
       </div>
 
+      {/* Per-Agent Breakdown */}
       {budget.agentBreakdown.length > 0 && (
         <div>
-          <h3 className="text-xs font-medium text-zinc-500 uppercase tracking-wide mb-2">
+          <h3 className="text-xs font-medium text-zinc-500 uppercase tracking-wide mb-3">
             Per Agent
           </h3>
-          <div className="space-y-1">
-            {budget.agentBreakdown.map((agent) => (
-              <div key={agent.agentId} className="flex justify-between text-xs">
-                <span className="text-zinc-400">{agent.agentType}</span>
-                <span className="text-zinc-500">${agent.costUsd.toFixed(4)}</span>
-              </div>
-            ))}
+          <div className="border border-zinc-800 rounded-lg overflow-hidden">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="bg-zinc-800/50">
+                  <th className="text-left px-3 py-2 text-zinc-500 font-medium">Agent</th>
+                  <th className="text-right px-3 py-2 text-zinc-500 font-medium">Input</th>
+                  <th className="text-right px-3 py-2 text-zinc-500 font-medium">Output</th>
+                  <th className="text-right px-3 py-2 text-zinc-500 font-medium">Cost</th>
+                </tr>
+              </thead>
+              <tbody>
+                {budget.agentBreakdown.map((agent) => (
+                  <tr key={agent.agentId} className="border-t border-zinc-800/50">
+                    <td className="px-3 py-2 text-zinc-300">{agent.agentType}</td>
+                    <td className="px-3 py-2 text-right text-zinc-400 font-mono">
+                      {agent.inputTokens.toLocaleString()}
+                    </td>
+                    <td className="px-3 py-2 text-right text-zinc-400 font-mono">
+                      {agent.outputTokens.toLocaleString()}
+                    </td>
+                    <td className="px-3 py-2 text-right text-zinc-400 font-mono">
+                      ${agent.costUsd.toFixed(4)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </div>
       )}
@@ -63,11 +109,12 @@ export function ContextDashboard() {
   );
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
+function TokenStat({ label, value, percentage, color }: { label: string; value: number; percentage: string; color: string }) {
   return (
-    <div className="bg-zinc-900 rounded px-2 py-1.5">
-      <div className="text-zinc-600">{label}</div>
-      <div className="text-zinc-300 font-mono">{value}</div>
+    <div className="bg-zinc-800/50 rounded-lg px-3 py-2.5">
+      <div className="text-zinc-500 text-xs mb-1">{label}</div>
+      <div className="text-zinc-200 font-mono text-sm">{value.toLocaleString()}</div>
+      <div className={`text-xs mt-0.5 ${color}`}>{percentage}%</div>
     </div>
   );
 }

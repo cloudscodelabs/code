@@ -7,6 +7,8 @@ import { getProjectManager } from './projects/project-manager.js';
 import { getOrchestrator } from './agents/orchestrator.js';
 import { getAgentManager } from './agents/agent-manager.js';
 import { getPlanManager } from './plans/plan-manager.js';
+import { getWorkflowManager } from './workflows/workflow-manager.js';
+import { RollbackManager } from './workflows/rollback-manager.js';
 
 export function handleClientMessage(ws: WebSocket, message: ClientMessage): void {
   switch (message.type) {
@@ -29,7 +31,7 @@ export function handleClientMessage(ws: WebSocket, message: ClientMessage): void
       handleAgentInterrupt(ws, message.payload.agentId);
       break;
     case 'plan:send':
-      handlePlanSend(ws, message.payload.content, message.payload.model);
+      handlePlanSend(ws, message.payload.content, message.payload.model, message.payload.planSessionId);
       break;
     case 'plan:interrupt':
       handlePlanInterrupt(ws);
@@ -45,6 +47,15 @@ export function handleClientMessage(ws: WebSocket, message: ClientMessage): void
       break;
     case 'plan:execute':
       handlePlanExecute(ws, message.payload.planId);
+      break;
+    case 'workflow:create':
+      handleWorkflowCreate(ws, message.payload);
+      break;
+    case 'workflow:resume':
+      handleWorkflowResume(ws, message.payload.planId);
+      break;
+    case 'workflow:rollback':
+      handleWorkflowRollback(ws, message.payload.planId);
       break;
     default:
       logger.warn({ type: (message as any).type }, 'Unknown message type');
@@ -144,10 +155,10 @@ async function handleSkipSetup(ws: WebSocket): Promise<void> {
 // Plan mode handlers
 // ---------------------------------------------------------------------------
 
-async function handlePlanSend(ws: WebSocket, content: string, model?: string): Promise<void> {
+async function handlePlanSend(ws: WebSocket, content: string, model?: string, planSessionId?: string): Promise<void> {
   try {
     const orchestrator = getOrchestrator();
-    await orchestrator.handlePlanMessage(content, ws, { model });
+    await orchestrator.handlePlanMessage(content, ws, { model, planSessionId });
   } catch (err) {
     logger.error({ err }, 'Error handling plan message');
     sendTo(ws, {
@@ -210,6 +221,71 @@ async function handlePlanExecute(ws: WebSocket, planId: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Workflow handlers
+// ---------------------------------------------------------------------------
+
+async function handleWorkflowCreate(
+  ws: WebSocket,
+  payload: { projectId: string; templateId: string; userMessage: string; customTitle?: string },
+): Promise<void> {
+  try {
+    const manager = getWorkflowManager();
+    const plan = manager.createFromTemplate(payload.projectId, payload.templateId, {
+      userMessage: payload.userMessage,
+      customTitle: payload.customTitle,
+    });
+    broadcast({ type: 'plan:updated', payload: plan });
+  } catch (err) {
+    logger.error({ err }, 'Error creating workflow');
+    sendTo(ws, {
+      type: 'chat:error',
+      payload: { message: err instanceof Error ? err.message : 'Workflow creation failed' },
+    });
+  }
+}
+
+async function handleWorkflowResume(ws: WebSocket, planId: string): Promise<void> {
+  try {
+    const orchestrator = getOrchestrator();
+    await orchestrator.resumeWorkflow(planId, ws);
+  } catch (err) {
+    logger.error({ err }, 'Error resuming workflow');
+    sendTo(ws, {
+      type: 'chat:error',
+      payload: { message: err instanceof Error ? err.message : 'Workflow resume failed' },
+    });
+  }
+}
+
+async function handleWorkflowRollback(ws: WebSocket, planId: string): Promise<void> {
+  try {
+    const planManager = getPlanManager();
+    const plan = planManager.getPlan(planId);
+    if (!plan) {
+      sendTo(ws, { type: 'chat:error', payload: { message: 'Plan not found' } });
+      return;
+    }
+
+    const orchestrator = getOrchestrator();
+    const project = orchestrator.getProject();
+    if (!project) {
+      sendTo(ws, { type: 'chat:error', payload: { message: 'No active project' } });
+      return;
+    }
+
+    const cwd = project.directoryPath ?? process.cwd();
+    const rollbackManager = new RollbackManager();
+    rollbackManager.rollback(plan, cwd);
+  } catch (err) {
+    logger.error({ err }, 'Error rolling back workflow');
+    sendTo(ws, {
+      type: 'chat:error',
+      payload: { message: err instanceof Error ? err.message : 'Rollback failed' },
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Project handlers
 // ---------------------------------------------------------------------------
 
@@ -239,14 +315,18 @@ async function handleProjectResume(ws: WebSocket, projectId: string): Promise<vo
       });
     }
 
-    // Send plan messages separately
-    const planMessages = projectManager.getPlanMessages(projectId);
-    if (planMessages.length > 0) {
-      sendTo(ws, {
-        type: 'project:plan_messages',
-        payload: { projectId, messages: planMessages },
-      });
+    // Send plan messages scoped to the current plan session (if any)
+    const currentPlanSessionId = orchestrator.getCurrentPlanSessionId();
+    if (currentPlanSessionId) {
+      const planMessages = projectManager.getPlanMessages(projectId, currentPlanSessionId);
+      if (planMessages.length > 0) {
+        sendTo(ws, {
+          type: 'project:plan_messages',
+          payload: { projectId, messages: planMessages, planSessionId: currentPlanSessionId },
+        });
+      }
     }
+    // If no active plan session, don't send old plan messages — frontend starts with empty plan chat
 
     // Send agent history and tool calls
     try {

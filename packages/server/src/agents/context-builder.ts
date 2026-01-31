@@ -1,9 +1,12 @@
-import type { AgentType, AgentContextSection, Project } from '@cloudscode/shared';
+import type { AgentType, AgentContextSection, Project, MemoryEntry } from '@cloudscode/shared';
+import { MAX_MEMORY_INJECTION_ENTRIES } from '@cloudscode/shared';
 import { getAgentDefinition, type ContextHints } from './agent-definitions.js';
 import { getContextManager } from '../context/context-manager.js';
+import { getMemoryStore } from '../context/memory-store.js';
 import { getSummaryCache } from '../context/summary-cache.js';
 import { getWorkspaceFiles } from '../workspace/workspace-files.js';
 import { getProjectManager } from '../projects/project-manager.js';
+import { buildUnifiedKnowledge } from './knowledge-dedup.js';
 import { logger } from '../logger.js';
 
 const MAX_CONVERSATION_CONTEXT_LENGTH = 500;
@@ -43,15 +46,47 @@ export function buildContextPackage(
   parts.push(`\n\n## Your Task\n${taskDescription}`);
   sections.push({ name: 'Task', included: true, content: taskDescription });
 
-  // Project context (name, purpose, language, architecture, conventions, tech stack)
-  if (hints.projectContext) {
-    const projectCtx = buildProjectContext(project);
-    if (projectCtx) {
-      parts.push(`\n\n## Project Context\n${projectCtx}`);
+  // Unified Project Knowledge (settings + memory, deduplicated)
+  if (hints.projectContext || hints.memory) {
+    let unifiedContent: string | null = null;
+    try {
+      const projectCtx = hints.projectContext ? buildProjectContext(project) : null;
+      let memoryEntries: MemoryEntry[] = [];
+
+      if (hints.memory) {
+        try {
+          const memoryStore = getMemoryStore();
+          const results = memoryStore.searchByProject(
+            project.workspaceId, project.id, taskDescription, MAX_MEMORY_INJECTION_ENTRIES,
+          );
+          if (results.length > 0) {
+            memoryEntries = results.map((r) => r.entry);
+          } else {
+            const recent = memoryStore.listByProject(project.workspaceId, project.id);
+            memoryEntries = recent.slice(0, MAX_MEMORY_INJECTION_ENTRIES);
+          }
+        } catch {
+          logger.debug('MemoryStore not available for unified context');
+        }
+      }
+
+      const unified = buildUnifiedKnowledge(
+        projectCtx,
+        memoryEntries,
+        project.metadata,
+        project.updatedAt,
+      );
+
+      if (unified) {
+        parts.push(`\n\n## Project Knowledge\n${unified}`);
+        unifiedContent = unified;
+      }
+    } catch {
+      logger.debug('Failed to build unified knowledge context');
     }
-    sections.push({ name: 'Project Context', included: true, content: projectCtx });
+    sections.push({ name: 'Project Knowledge', included: true, content: unifiedContent });
   } else {
-    sections.push({ name: 'Project Context', included: false, content: null });
+    sections.push({ name: 'Project Knowledge', included: false, content: null });
   }
 
   // Workspace files (PROJECT.md, CONVENTIONS.md)
@@ -71,24 +106,6 @@ export function buildContextPackage(
     sections.push({ name: 'Workspace Files', included: true, content: wsContent });
   } else {
     sections.push({ name: 'Workspace Files', included: false, content: null });
-  }
-
-  // Memory context (FTS5 search against task description)
-  if (hints.memory) {
-    let memContent: string | null = null;
-    try {
-      const contextManager = getContextManager();
-      const memoryCtx = contextManager.getMemoryContext(project.workspaceId, taskDescription, project.id);
-      if (memoryCtx) {
-        parts.push(`\n\n## Project Knowledge\n${memoryCtx}`);
-        memContent = memoryCtx;
-      }
-    } catch {
-      logger.debug('ContextManager not available for memory context');
-    }
-    sections.push({ name: 'Memory', included: true, content: memContent });
-  } else {
-    sections.push({ name: 'Memory', included: false, content: null });
   }
 
   // Session summary
@@ -160,23 +177,23 @@ export function buildProjectContext(project: Project): string | null {
   }
 
   // Avoid paths
-  if (meta.ai?.avoidPaths && meta.ai.avoidPaths.length > 0) {
+  if (Array.isArray(meta.ai?.avoidPaths) && meta.ai.avoidPaths.length > 0) {
     parts.push(`Avoid paths: ${meta.ai.avoidPaths.join(', ')}`);
   }
 
   // Key conventions (top 5)
-  if (meta.codingStandards && meta.codingStandards.length > 0) {
+  if (Array.isArray(meta.codingStandards) && meta.codingStandards.length > 0) {
     const top = meta.codingStandards.slice(0, 5);
     parts.push(`\nConventions:\n${top.map((s) => `- ${s.rule}: ${s.description}`).join('\n')}`);
   }
 
   // Active services
-  if (meta.services && meta.services.length > 0) {
+  if (Array.isArray(meta.services) && meta.services.length > 0) {
     parts.push(`Services: ${meta.services.map((s) => s.name).join(', ')}`);
   }
 
   // Tech stack
-  if (meta.techStack && meta.techStack.length > 0) {
+  if (Array.isArray(meta.techStack) && meta.techStack.length > 0) {
     const primary = meta.techStack.filter((t) => t.isPrimary);
     if (primary.length > 0) {
       parts.push(`Tech stack: ${primary.map((t) => `${t.name}${t.version ? ` ${t.version}` : ''}`).join(', ')}`);
