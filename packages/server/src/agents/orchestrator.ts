@@ -855,7 +855,7 @@ class Orchestrator {
       // Persist context sections to database
       agentManager.setAgentContextSections(orchestratorNode.id, orchestratorSections);
 
-      const routeResult = await this.routeMessage(content, project, recentMessages, signal, model, memorySummary);
+      const routeResult = await this.routeMessage(content, project, recentMessages, signal as any, model, memorySummary);
       const routingUsage = routeResult.usage ?? { costUsd: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
 
       if (signal.aborted) {
@@ -934,7 +934,7 @@ class Orchestrator {
         const agentAbortController = new AbortController();
         this.subAgentAbortControllers.set(preCreatedAgentNode.id, agentAbortController);
 
-        const result = await runSubAgent(plan, project, orchestratorNode.id, signal, cwd, {
+        const result = await runSubAgent(plan, project, orchestratorNode.id, signal as any, cwd, {
           preCreatedAgentNode,
           agentAbortController,
           ...(channel ? { channel } : {}),
@@ -989,7 +989,7 @@ class Orchestrator {
           project,
           successfulResults,
           routeResult.synthesisHint ?? '',
-          signal,
+          signal as any,
           model,
         );
         finalResponse = synthesisResult.text;
@@ -1351,7 +1351,7 @@ class Orchestrator {
         : projectManager.getRecentMessages(project.id, MAX_ROUTING_HISTORY_MESSAGES, 'plan');
 
       // Generate plan via query() SDK call (handles OAuth internally)
-      const responseText = await this.generatePlan(content, project, recentMessages, signal, ws, model);
+      const responseText = await this.generatePlan(content, project, recentMessages, signal as any, ws, model);
 
       if (signal.aborted) {
         agentManager.updateAgentStatus(orchestratorNode.id, 'interrupted');
