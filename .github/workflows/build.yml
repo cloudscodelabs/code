@@ -60,10 +60,15 @@ jobs:
               if (stat.isSymbolicLink()) {
                 const real = fs.realpathSync(full);
                 if (!real.startsWith(electronRoot + path.sep)) {
+                  const targetStat = fs.statSync(real);
                   fs.rmSync(full);
-                  fs.cpSync(real, full, { recursive: true });
-                  console.log('Dereferenced:', full, '->', real);
-                  derefSymlinks(full);
+                  if (targetStat.isDirectory()) {
+                    fs.cpSync(real, full, { recursive: true });
+                    console.log('Dereferenced dir:', full);
+                    derefSymlinks(full);
+                  } else {
+                    fs.copyFileSync(real, full);
+                  }
                 }
               } else if (stat.isDirectory() && entry !== '.pnpm') {
                 derefSymlinks(full);
