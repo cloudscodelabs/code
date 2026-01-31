@@ -45,6 +45,25 @@ jobs:
       - name: Build packages
         run: pnpm build
 
+      - name: Dereference workspace symlinks for electron-builder
+        shell: bash
+        run: |
+          node -e "
+          const fs = require('fs');
+          const path = require('path');
+          const wsDir = path.join('packages', 'electron', 'node_modules', '@cloudscode');
+          if (!fs.existsSync(wsDir)) process.exit(0);
+          for (const entry of fs.readdirSync(wsDir)) {
+            const full = path.join(wsDir, entry);
+            if (fs.lstatSync(full).isSymbolicLink()) {
+              const target = fs.realpathSync(full);
+              fs.rmSync(full);
+              fs.cpSync(target, full, { recursive: true });
+              console.log('Dereferenced:', full, '->', target);
+            }
+          }
+          "
+
       - name: Rebuild native modules for Electron
         run: pnpm --filter @cloudscode/electron rebuild-native
         if: matrix.platform != 'mac'
