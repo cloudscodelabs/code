@@ -1,7 +1,9 @@
 appId: com.cloudscode.app
 productName: CLouds Code
 copyright: Copyright © 2025
-homepage: https://github.com/cloudscodelabs/code
+
+extraMetadata:
+  homepage: https://github.com/cloudscodelabs/code
 
 directories:
   output: release
