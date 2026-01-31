@@ -10,6 +10,12 @@ files:
   - dist/**/*
   - node_modules/**/*
   - package.json
+  - "!**/.turbo"
+  - "!**/src"
+  - "!**/tsconfig*.json"
+  - "!**/*.tsbuildinfo"
+  - "!**/*.ts"
+  - "!**/node_modules/.cache"
 
 extraResources:
   - from: ../web/dist
