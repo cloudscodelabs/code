@@ -10,6 +10,7 @@ import type { Project } from '@cloudscode/shared';
 import { getAuthInfo } from '../auth/api-key-provider.js';
 import { broadcast } from '../ws.js';
 import { logger } from '../logger.js';
+import { resolveModelId } from './model-utils.js';
 
 export interface SubAgentResult {
   agentId: string;
@@ -107,7 +108,7 @@ export async function runSubAgent(
     customSystemPrompt: contextPackage.systemPrompt,
     cwd,
     permissionMode: 'bypassPermissions',
-    model: (plan.model ?? 'sonnet') as any,
+    model: resolveModelId(plan.model) as any,
     maxTurns: 30,
     hooks,
     includePartialMessages: true,
@@ -195,7 +196,11 @@ export async function runSubAgent(
 
     // If we exited the loop due to abort (global or per-agent)
     if (abortSignal.aborted || abortController.signal.aborted) {
-      agentManager.updateAgentStatus(agentNode.id, 'interrupted');
+      // Guard: interruptAgent may have already set status to 'interrupted'
+      const currentAgent = agentManager.getAgent(agentNode.id);
+      if (currentAgent && currentAgent.status === 'running') {
+        agentManager.updateAgentStatus(agentNode.id, 'interrupted');
+      }
       return {
         agentId: agentNode.id,
         agentType: plan.agentType,
@@ -227,7 +232,11 @@ export async function runSubAgent(
     logger.error({ err, agentId: agentNode.id }, 'Sub-agent query error');
 
     if (abortSignal.aborted || abortController.signal.aborted) {
-      agentManager.updateAgentStatus(agentNode.id, 'interrupted');
+      // Guard: interruptAgent may have already set status to 'interrupted'
+      const currentAgent = agentManager.getAgent(agentNode.id);
+      if (currentAgent && currentAgent.status === 'running') {
+        agentManager.updateAgentStatus(agentNode.id, 'interrupted');
+      }
       return {
         agentId: agentNode.id,
         agentType: plan.agentType,

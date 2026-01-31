@@ -2,6 +2,8 @@ export type MemoryCategory = 'architecture' | 'convention' | 'decision' | 'fact'
 
 export type MemoryScope = 'project' | 'workspace';
 
+export type TaskIntent = 'bug-fix' | 'feature' | 'refactor' | 'analysis' | 'general';
+
 export interface MemoryEntry {
   id: string;
   workspaceId: string;

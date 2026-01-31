@@ -315,9 +315,19 @@ export function useWebSocket() {
 
     const unsubscribe = wsClient.onMessage(handleMessage);
 
+    // Re-sync project state after a WebSocket reconnection so missed
+    // agent:stopped events don't leave agents stuck as "running"
+    const unsubReconnect = wsClient.onReconnect(() => {
+      const activeProject = useProjectStore.getState().activeProject;
+      if (activeProject) {
+        wsClient.send({ type: 'project:resume', payload: { projectId: activeProject.id } });
+      }
+    });
+
     return () => {
-      // Only unsubscribe the handler; keep the singleton WS connection alive
+      // Only unsubscribe the handlers; keep the singleton WS connection alive
       unsubscribe();
+      unsubReconnect();
     };
   }, []);
 }

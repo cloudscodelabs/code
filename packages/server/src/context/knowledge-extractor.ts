@@ -1,5 +1,5 @@
 import { query } from '@anthropic-ai/claude-code';
-import type { MemoryCategory } from '@cloudscode/shared';
+import type { MemoryCategory, MemoryEntry } from '@cloudscode/shared';
 import { getMemoryStore } from './memory-store.js';
 import { broadcast } from '../ws.js';
 import { logger } from '../logger.js';
@@ -85,6 +85,36 @@ class KnowledgeExtractor {
           continue;
         }
 
+        // Dedup: check for similar existing entries before creating
+        const similar = this.findSimilarEntry(memoryStore, workspaceId, projectId, fact);
+        if (similar) {
+          // Similar entry exists — update or just boost confidence
+          if (fact.content.length > similar.content.length) {
+            // New content is more detailed — update content and boost confidence
+            memoryStore.update(similar.id, {
+              content: fact.content,
+              confidence: Math.min(1.0, similar.confidence + 0.05),
+            });
+            logger.debug({ existingId: similar.id, key: fact.key }, 'Updated existing memory entry with longer content');
+          } else {
+            // Existing content is sufficient — just boost confidence
+            memoryStore.update(similar.id, {
+              confidence: Math.min(1.0, similar.confidence + 0.05),
+            });
+            logger.debug({ existingId: similar.id, key: fact.key }, 'Boosted confidence of existing memory entry');
+          }
+
+          const updated = memoryStore.get(similar.id);
+          if (updated) {
+            broadcast({
+              type: 'memory:updated',
+              payload: { entry: updated, action: 'updated' },
+            });
+          }
+          stored.push(fact);
+          continue;
+        }
+
         const entry = memoryStore.create(workspaceId, {
           category: fact.category,
           key: fact.key,
@@ -106,6 +136,47 @@ class KnowledgeExtractor {
       logger.error({ err }, 'Knowledge extraction failed');
       return [];
     }
+  }
+
+  /**
+   * Finds an existing memory entry that is similar to the given fact.
+   * Checks entries in the same category for key overlap: exact match
+   * or >= 50% word overlap between keys.
+   */
+  private findSimilarEntry(
+    memoryStore: ReturnType<typeof getMemoryStore>,
+    workspaceId: string,
+    projectId: string,
+    fact: ExtractedFact,
+  ): MemoryEntry | null {
+    const existing = memoryStore.listByProject(workspaceId, projectId, fact.category);
+
+    const newKeyWords = new Set(
+      fact.key.toLowerCase().split(/\s+/).filter((w) => w.length > 1),
+    );
+
+    for (const entry of existing) {
+      // Exact key match
+      if (entry.key.toLowerCase() === fact.key.toLowerCase()) {
+        return entry;
+      }
+
+      // Word overlap check
+      const existingKeyWords = entry.key.toLowerCase().split(/\s+/).filter((w) => w.length > 1);
+      if (existingKeyWords.length === 0) continue;
+
+      let overlapCount = 0;
+      for (const word of existingKeyWords) {
+        if (newKeyWords.has(word)) overlapCount++;
+      }
+
+      const overlapRatio = overlapCount / Math.max(newKeyWords.size, existingKeyWords.length);
+      if (overlapRatio >= 0.5) {
+        return entry;
+      }
+    }
+
+    return null;
   }
 }
 

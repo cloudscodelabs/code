@@ -1,6 +1,7 @@
 import type { WebSocket } from 'ws';
 import type { ClientMessage } from '@cloudscode/shared';
 import { logger } from './logger.js';
+import { nowUnix } from '@cloudscode/shared';
 import { sendTo, broadcast } from './ws.js';
 import { getDb } from './db/database.js';
 import { getProjectManager } from './projects/project-manager.js';
@@ -331,6 +332,30 @@ async function handleProjectResume(ws: WebSocket, projectId: string): Promise<vo
     // Send agent history and tool calls
     try {
       const { agents, contextSections } = getAgentManager().getAgentHistoryWithContexts(projectId);
+      const agentManager = getAgentManager();
+
+      // Clean up stale 'running' agents from previous sessions.
+      // If an agent shows as 'running' in the DB but has no in-memory entry,
+      // it's a leftover from a crashed/interrupted session.
+      const now = nowUnix();
+      for (const agent of agents) {
+        if (agent.status === 'running' && !agentManager.getAgent(agent.id)) {
+          agent.status = 'interrupted';
+          agent.completedAt = now;
+          if (agent.startedAt) {
+            agent.durationMs = (now - agent.startedAt) * 1000;
+          }
+          try {
+            getDb().prepare(
+              `UPDATE agent_runs SET status = 'interrupted', completed_at = ?, duration_ms = ? WHERE id = ?`
+            ).run(now, agent.durationMs, agent.id);
+          } catch (err) {
+            logger.error({ err, agentId: agent.id }, 'Failed to clean up stale agent');
+          }
+          logger.info({ agentId: agent.id }, 'Cleaned up stale running agent on project resume');
+        }
+      }
+
       const toolCallRows = getDb().prepare(
         `SELECT id, project_id, agent_id, tool_name, input, output, status, duration_ms, started_at, completed_at
          FROM tool_calls WHERE project_id = ? ORDER BY started_at ASC LIMIT 200`

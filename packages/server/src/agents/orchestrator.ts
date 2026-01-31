@@ -2,7 +2,7 @@ import { query } from '@anthropic-ai/claude-code';
 import type { Query, SDKMessage, Options } from '@anthropic-ai/claude-code';
 import { createProjectSettingsMcpServer } from './project-settings-mcp.js';
 import type { WebSocket } from 'ws';
-import type { Project, AgentType, AgentContextSection, ProjectMetadata, StoredMessage, Plan, PlanStep, MemoryEntry } from '@cloudscode/shared';
+import type { Project, AgentType, AgentNode, AgentContextSection, ProjectMetadata, StoredMessage, Plan, PlanStep, MemoryEntry } from '@cloudscode/shared';
 import type { Config } from '../config.js';
 import { getAgentManager } from './agent-manager.js';
 import { createHooksConfig } from './hooks.js';
@@ -13,12 +13,14 @@ import { getProjectManager } from '../projects/project-manager.js';
 import { getAuthInfo, hasValidAuth } from '../auth/api-key-provider.js';
 import { getProjectsRootDir } from '../projects/directory-manager.js';
 import { broadcast, sendTo } from '../ws.js';
+import { getDb } from '../db/database.js';
 import { logger } from '../logger.js';
 import { runSubAgent, type SubAgentPlan, type SubAgentResult } from './sub-agent-runner.js';
 import { agentDefinitions } from './agent-definitions.js';
 import { buildProjectContext } from './context-builder.js';
-import { getMemoryStore } from '../context/memory-store.js';
+import { getMemoryStore, detectTaskIntent } from '../context/memory-store.js';
 import { buildUnifiedKnowledge } from './knowledge-dedup.js';
+import { resolveModelId } from './model-utils.js';
 import { getWorkspaceFiles } from '../workspace/workspace-files.js';
 import { MAX_ROUTING_HISTORY_MESSAGES, MAX_ROUTING_MESSAGE_LENGTH, MAX_MEMORY_INJECTION_ENTRIES, generateId, nowUnix } from '@cloudscode/shared';
 import { getPlanManager } from '../plans/plan-manager.js';
@@ -225,7 +227,7 @@ function buildSetupProgress(project: Project, metadata: ProjectMetadata, message
 // Routing prompt — minimal context for Phase 1
 // ---------------------------------------------------------------------------
 
-function buildRoutingPrompt(project: Project, chatHistory?: StoredMessage[]): string {
+function buildRoutingPrompt(project: Project, chatHistory?: StoredMessage[], memorySummary?: string): string {
   const agentDescriptions = Object.values(agentDefinitions)
     .map((d) => `- **${d.type}**: ${d.description}`)
     .join('\n');
@@ -241,6 +243,11 @@ function buildRoutingPrompt(project: Project, chatHistory?: StoredMessage[]): st
     historySection = `\n\n## Recent Conversation\n${truncated}\n\nWhen the user refers to previous discussion, use the conversation above to understand what they mean.`;
   }
 
+  let knowledgeSection = '';
+  if (memorySummary) {
+    knowledgeSection = `\n\n## Project Knowledge\n${memorySummary}\n\nUse this knowledge to write more specific task descriptions for sub-agents.`;
+  }
+
   return `You are a routing agent for the project "${project.title ?? 'Untitled'}".
 Project purpose: ${project.purpose ?? 'General development'}
 
@@ -248,7 +255,7 @@ Your job is to analyze the user's message and decide how to handle it.
 
 ## Available Sub-Agents
 ${agentDescriptions}
-${historySection}
+${historySection}${knowledgeSection}
 
 ## Routing Rules
 - For simple greetings, conversational messages, or questions you can answer from the project context alone, respond directly.
@@ -310,20 +317,6 @@ Provide a concise, helpful response that addresses the user's original request. 
 }
 
 // ---------------------------------------------------------------------------
-// Model name → full model ID map
-// ---------------------------------------------------------------------------
-
-const MODEL_MAP: Record<string, string> = {
-  sonnet: 'claude-sonnet-4-20250514',
-  opus: 'claude-opus-4-20250514',
-  haiku: 'claude-haiku-4-20250514',
-};
-
-function resolveModelId(shortName?: string): string {
-  return MODEL_MAP[shortName ?? 'sonnet'] ?? MODEL_MAP.sonnet;
-}
-
-// ---------------------------------------------------------------------------
 // Routing response types
 // ---------------------------------------------------------------------------
 
@@ -365,6 +358,9 @@ class Orchestrator {
   private abortController: AbortController | null = null;
   private currentAgentNodeId: string | null = null;
   private subAgentAbortControllers = new Map<string, AbortController>();
+
+  // User's model preference (updated on each message)
+  private currentModel: string = 'sonnet';
 
   // Plan mode state
   private planModeActive = false;
@@ -429,6 +425,7 @@ class Orchestrator {
 
   async handlePlanMessage(content: string, ws: WebSocket, opts?: { model?: string; planSessionId?: string }): Promise<void> {
     const model = opts?.model ?? 'sonnet';
+    this.currentModel = model;
 
     if (!this.planModeActive) {
       // New plan session — generate a unique session ID to scope messages
@@ -575,6 +572,7 @@ class Orchestrator {
   async handleMessage(content: string, ws: WebSocket, messageOpts?: { persist?: boolean; model?: string }): Promise<void> {
     const persist = messageOpts?.persist !== false;
     const model = messageOpts?.model ?? 'sonnet';
+    this.currentModel = model;
 
     if (!hasValidAuth()) {
       sendTo(ws, {
@@ -643,7 +641,7 @@ class Orchestrator {
       customSystemPrompt: systemPrompt,
       cwd: project.directoryPath ?? this.config.PROJECT_ROOT,
       permissionMode: 'bypassPermissions',
-      model: model as any,
+      model: resolveModelId(model) as any,
       maxTurns: 30,
       hooks: createHooksConfig(),
       includePartialMessages: true,
@@ -819,8 +817,25 @@ class Orchestrator {
       // Fetch recent chat history for routing context
       const recentMessages = projectManager.getRecentMessages(project.id, MAX_ROUTING_HISTORY_MESSAGES);
 
+      // Search memory for routing context — compact summary of keys + categories
+      let memorySummary: string | undefined;
+      try {
+        const memStore = getMemoryStore();
+        const intent = detectTaskIntent(content);
+        const memResults = memStore.searchByProjectWithIntent(
+          project.workspaceId, project.id, content, intent, 8,
+        );
+        if (memResults.length > 0) {
+          memorySummary = memResults
+            .map((r) => `[${r.entry.category}] ${r.entry.key}`)
+            .join(', ');
+        }
+      } catch {
+        logger.debug('MemoryStore not available for routing context');
+      }
+
       // Broadcast orchestrator context sections to the UI
-      const routingPrompt = buildRoutingPrompt(project, recentMessages);
+      const routingPrompt = buildRoutingPrompt(project, recentMessages, memorySummary);
       const chatHistoryContent = recentMessages.length > 0
         ? recentMessages.map((m) => `${m.role}: ${m.content.slice(0, MAX_ROUTING_MESSAGE_LENGTH)}`).join('\n')
         : null;
@@ -840,7 +855,7 @@ class Orchestrator {
       // Persist context sections to database
       agentManager.setAgentContextSections(orchestratorNode.id, orchestratorSections);
 
-      const routeResult = await this.routeMessage(content, project, recentMessages, signal, model);
+      const routeResult = await this.routeMessage(content, project, recentMessages, signal, model, memorySummary);
       const routingUsage = routeResult.usage ?? { costUsd: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
 
       if (signal.aborted) {
@@ -1080,9 +1095,11 @@ class Orchestrator {
     chatHistory: StoredMessage[],
     signal: AbortSignal,
     model: string = 'sonnet',
+    memorySummary?: string,
   ): Promise<RouteResponse & { usage?: { costUsd: number; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number } }> {
-    const routingPrompt = buildRoutingPrompt(project, chatHistory);
+    const routingPrompt = buildRoutingPrompt(project, chatHistory, memorySummary);
 
+    let responseText = '';
     try {
       const q = query({
         prompt: content,
@@ -1098,15 +1115,34 @@ class Orchestrator {
         },
       });
 
-      const { text: responseText, costUsd, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens } = await this.collectQueryText(q, signal);
+      const collected = await this.collectQueryText(q, signal);
+      responseText = collected.text;
+      const { costUsd, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens } = collected;
       const usage = { costUsd, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens };
 
       if (signal.aborted) {
         return { directResponse: '', usage };
       }
 
-      // Parse JSON from response (may be wrapped in markdown code block)
-      const jsonStr = responseText.replace(/```json\s*\n?/g, '').replace(/```\s*$/g, '').trim();
+      // Parse JSON from response — try multiple extraction strategies
+      let jsonStr: string;
+
+      // Strategy 1: Extract content inside a markdown code fence
+      const fenceMatch = responseText.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/);
+      if (fenceMatch) {
+        jsonStr = fenceMatch[1].trim();
+      } else {
+        // Strategy 2: Find the first '{' and last matching '}' to extract the JSON object
+        const firstBrace = responseText.indexOf('{');
+        const lastBrace = responseText.lastIndexOf('}');
+        if (firstBrace !== -1 && lastBrace > firstBrace) {
+          jsonStr = responseText.slice(firstBrace, lastBrace + 1);
+        } else {
+          // Strategy 3: Fall back to trimmed raw text
+          jsonStr = responseText.trim();
+        }
+      }
+
       const parsed = JSON.parse(jsonStr) as RouteResponse;
 
       // Validate the response
@@ -1129,7 +1165,7 @@ class Orchestrator {
         usage,
       };
     } catch (err) {
-      logger.error({ err }, 'Routing API call failed');
+      logger.error({ err, responseText: responseText.slice(0, 500) }, 'Routing API call failed — falling back to code-analyst');
 
       // Fallback: treat as a direct response
       // If routing fails, delegate to a code-analyst as a safe default
@@ -1377,15 +1413,11 @@ class Orchestrator {
       let memoryEntries: MemoryEntry[] = [];
       try {
         const memoryStore = getMemoryStore();
-        const results = memoryStore.searchByProject(
-          project.workspaceId, project.id, content, MAX_MEMORY_INJECTION_ENTRIES,
+        const intent = detectTaskIntent(content);
+        const results = memoryStore.searchByProjectWithIntent(
+          project.workspaceId, project.id, content, intent, MAX_MEMORY_INJECTION_ENTRIES,
         );
-        if (results.length > 0) {
-          memoryEntries = results.map((r) => r.entry);
-        } else {
-          const recent = memoryStore.listByProject(project.workspaceId, project.id);
-          memoryEntries = recent.slice(0, MAX_MEMORY_INJECTION_ENTRIES);
-        }
+        memoryEntries = results.map((r) => r.entry);
       } catch {
         logger.debug('MemoryStore not available for plan context');
       }
@@ -1568,6 +1600,7 @@ class Orchestrator {
         const executor = new WorkflowExecutor();
         await executor.execute(plan, project, ws, {
           cwd,
+          model: this.currentModel,
           handleNormalMode: (content, wsRef, proj, model) =>
             this.handleNormalMode(content, wsRef, proj, model, 'plan'),
         });
@@ -1588,7 +1621,7 @@ class Orchestrator {
             `[Plan Step ${step.id}] ${step.title}\n\n${step.description}`,
             ws,
             project,
-            'sonnet',
+            this.currentModel,
             'plan',
           );
 
@@ -1661,6 +1694,9 @@ class Orchestrator {
     if (controller) {
       controller.abort();
       this.subAgentAbortControllers.delete(agentId);
+      // Immediately update status — don't rely on the iterator
+      const agentManager = getAgentManager();
+      agentManager.updateAgentStatus(agentId, 'interrupted');
       logger.info({ agentId }, 'Individual agent interrupted');
       return true;
     }
@@ -1678,6 +1714,49 @@ class Orchestrator {
       }
       logger.info({ agentId, status: agent.status }, 'Agent interrupt handled (no active controller)');
       return true;
+    }
+
+    // Agent not in memory — may be a stale agent loaded from DB (e.g. after server restart).
+    // Fall back to direct DB update so the stop button actually works.
+    try {
+      const db = getDb();
+      const row = db.prepare(
+        `SELECT id, project_id, agent_type, status, parent_agent_id, task_description, result_summary,
+                cost_usd, tokens, duration_ms, started_at, completed_at, model, response_text
+         FROM agent_runs WHERE id = ?`
+      ).get(agentId) as any;
+
+      if (row) {
+        const now = nowUnix();
+        if (row.status === 'running') {
+          db.prepare(
+            `UPDATE agent_runs SET status = 'interrupted', completed_at = ?, duration_ms = ? WHERE id = ?`
+          ).run(now, row.started_at ? (now - row.started_at) * 1000 : null, agentId);
+        }
+
+        const stoppedAgent: AgentNode = {
+          id: row.id,
+          projectId: row.project_id,
+          type: row.agent_type,
+          status: 'interrupted',
+          parentAgentId: row.parent_agent_id ?? null,
+          taskDescription: row.task_description ?? null,
+          resultSummary: row.result_summary ?? null,
+          costUsd: row.cost_usd ?? 0,
+          tokens: row.tokens ?? 0,
+          durationMs: row.started_at ? (now - row.started_at) * 1000 : null,
+          startedAt: row.started_at,
+          completedAt: now,
+          model: row.model ?? null,
+          responseText: row.response_text ?? null,
+        };
+        broadcast({ type: 'agent:stopped', payload: stoppedAgent });
+
+        logger.info({ agentId, previousStatus: row.status }, 'Stale agent interrupted via DB fallback');
+        return true;
+      }
+    } catch (err) {
+      logger.error({ err, agentId }, 'Failed to interrupt stale agent via DB');
     }
 
     return false;

@@ -8,6 +8,7 @@ import { RollbackManager } from './rollback-manager.js';
 
 interface ExecutorOptions {
   cwd: string;
+  model?: string;
   handleNormalMode: (content: string, ws: WebSocket, project: Project, model: string) => Promise<void>;
 }
 
@@ -118,7 +119,7 @@ export class WorkflowExecutor {
         `[Workflow Step ${step.id}] ${step.title}\n\n${step.description}`,
         ws,
         project,
-        'sonnet',
+        options.model ?? 'sonnet',
       );
 
       // Basic step output validation

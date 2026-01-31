@@ -2,7 +2,7 @@ import type { AgentType, AgentContextSection, Project, MemoryEntry } from '@clou
 import { MAX_MEMORY_INJECTION_ENTRIES } from '@cloudscode/shared';
 import { getAgentDefinition, type ContextHints } from './agent-definitions.js';
 import { getContextManager } from '../context/context-manager.js';
-import { getMemoryStore } from '../context/memory-store.js';
+import { getMemoryStore, detectTaskIntent } from '../context/memory-store.js';
 import { getSummaryCache } from '../context/summary-cache.js';
 import { getWorkspaceFiles } from '../workspace/workspace-files.js';
 import { getProjectManager } from '../projects/project-manager.js';
@@ -56,15 +56,11 @@ export function buildContextPackage(
       if (hints.memory) {
         try {
           const memoryStore = getMemoryStore();
-          const results = memoryStore.searchByProject(
-            project.workspaceId, project.id, taskDescription, MAX_MEMORY_INJECTION_ENTRIES,
+          const intent = detectTaskIntent(taskDescription);
+          const results = memoryStore.searchByProjectWithIntent(
+            project.workspaceId, project.id, taskDescription, intent, MAX_MEMORY_INJECTION_ENTRIES,
           );
-          if (results.length > 0) {
-            memoryEntries = results.map((r) => r.entry);
-          } else {
-            const recent = memoryStore.listByProject(project.workspaceId, project.id);
-            memoryEntries = recent.slice(0, MAX_MEMORY_INJECTION_ENTRIES);
-          }
+          memoryEntries = results.map((r) => r.entry);
         } catch {
           logger.debug('MemoryStore not available for unified context');
         }

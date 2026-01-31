@@ -5,7 +5,9 @@ type MessageHandler = (message: ServerMessage) => void;
 class WSClient {
   private ws: WebSocket | null = null;
   private handlers = new Set<MessageHandler>();
+  private reconnectCallbacks = new Set<() => void>();
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private wasConnected = false;
   private url: string;
 
   constructor() {
@@ -24,6 +26,13 @@ class WSClient {
         clearTimeout(this.reconnectTimer);
         this.reconnectTimer = null;
       }
+      if (this.wasConnected) {
+        // This is a reconnection — fire all reconnect callbacks
+        for (const cb of this.reconnectCallbacks) {
+          try { cb(); } catch (err) { console.error('[WS] Reconnect callback error:', err); }
+        }
+      }
+      this.wasConnected = true;
     };
 
     this.ws.onmessage = (event) => {
@@ -70,6 +79,13 @@ class WSClient {
     this.handlers.add(handler);
     return () => {
       this.handlers.delete(handler);
+    };
+  }
+
+  onReconnect(callback: () => void): () => void {
+    this.reconnectCallbacks.add(callback);
+    return () => {
+      this.reconnectCallbacks.delete(callback);
     };
   }
 

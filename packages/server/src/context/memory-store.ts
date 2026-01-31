@@ -1,7 +1,59 @@
-import type { MemoryEntry, MemoryCategory, MemoryScope, MemorySearchResult, CreateMemoryInput, UpdateMemoryInput } from '@cloudscode/shared';
+import type { MemoryEntry, MemoryCategory, MemoryScope, MemorySearchResult, CreateMemoryInput, UpdateMemoryInput, TaskIntent } from '@cloudscode/shared';
 import { generateId, nowUnix } from '@cloudscode/shared';
 import { getDb } from '../db/database.js';
 import { logger } from '../logger.js';
+
+// Stop words: common English words + task-instruction verbs that pollute FTS queries
+const STOP_WORDS = new Set([
+  // Common English
+  'a', 'an', 'the', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+  'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
+  'should', 'may', 'might', 'shall', 'can', 'need', 'must',
+  'i', 'me', 'my', 'we', 'our', 'you', 'your', 'he', 'she', 'it', 'they', 'them',
+  'this', 'that', 'these', 'those', 'what', 'which', 'who', 'whom',
+  'to', 'of', 'in', 'for', 'on', 'with', 'at', 'by', 'from', 'as',
+  'into', 'about', 'between', 'through', 'after', 'before', 'above', 'below',
+  'and', 'but', 'or', 'nor', 'not', 'so', 'if', 'then', 'than',
+  'no', 'yes', 'all', 'any', 'some', 'each', 'every', 'both',
+  'up', 'out', 'just', 'also', 'very', 'too', 'only',
+  // Task-instruction verbs
+  'fix', 'implement', 'analyze', 'analyse', 'review', 'check', 'update',
+  'create', 'add', 'remove', 'delete', 'modify', 'change', 'refactor',
+  'debug', 'test', 'write', 'read', 'find', 'search', 'look', 'make',
+  'get', 'set', 'run', 'build', 'deploy', 'ensure', 'verify', 'validate',
+  // Filler
+  'please', 'help', 'want', 'like', 'try', 'use', 'using', 'how',
+  'why', 'when', 'where', 'there', 'here',
+]);
+
+// Intent keyword patterns
+const INTENT_PATTERNS: Record<TaskIntent, RegExp> = {
+  'bug-fix': /\b(bug|fix|broken|error|crash|fail|issue|wrong|incorrect|regression|patch|hotfix|debug|exception|stack\s?trace)\b/i,
+  'feature': /\b(feature|add|new|implement|create|introduce|support|enable|extend|integrate|endpoint|ui|ux|page|component)\b/i,
+  'refactor': /\b(refactor|restructure|reorganize|clean\s?up|simplify|extract|rename|move|split|merge|consolidate|decouple|modularize|optimize|performance)\b/i,
+  'analysis': /\b(analyze|analyse|explain|understand|investigate|explore|review|audit|inspect|assess|evaluate|document|describe|how\s+does|what\s+is|architecture|structure)\b/i,
+  'general': /./,
+};
+
+// Category priority per intent — ordered from highest to lowest priority
+const INTENT_CATEGORY_PRIORITY: Record<TaskIntent, MemoryCategory[]> = {
+  'bug-fix': ['issue', 'fact', 'architecture', 'convention', 'decision'],
+  'feature': ['architecture', 'convention', 'decision', 'fact', 'issue'],
+  'refactor': ['architecture', 'convention', 'decision', 'fact', 'issue'],
+  'analysis': ['architecture', 'fact', 'decision', 'convention', 'issue'],
+  'general': ['fact', 'architecture', 'convention', 'decision', 'issue'],
+};
+
+export function detectTaskIntent(taskDescription: string): TaskIntent {
+  // Check patterns in priority order (most specific first)
+  const intents: TaskIntent[] = ['bug-fix', 'refactor', 'analysis', 'feature'];
+  for (const intent of intents) {
+    if (INTENT_PATTERNS[intent].test(taskDescription)) {
+      return intent;
+    }
+  }
+  return 'general';
+}
 
 class MemoryStore {
   create(workspaceId: string, input: CreateMemoryInput, sourceProjectId?: string): MemoryEntry {
@@ -111,21 +163,15 @@ class MemoryStore {
   search(workspaceId: string, queryText: string, limit: number = 10): MemorySearchResult[] {
     const db = getDb();
 
-    // Sanitize query for FTS5: strip special characters and quote each token
-    const sanitized = queryText
-      .replace(/[?*+\-"(){}[\]^~:\\/<>!@#$%&=|;,]/g, ' ')
-      .split(/\s+/)
-      .filter((t) => t.length > 0)
-      .map((t) => `"${t}"`)
-      .join(' OR ');
+    const sanitized = this.buildSearchTerms(queryText);
 
     if (!sanitized) {
       return [];
     }
 
-    // FTS5 search
+    // FTS5 search with bm25 ranking
     const rows = db.prepare(`
-      SELECT me.*, rank
+      SELECT me.*, bm25(memory_fts, 5.0, 1.0, 0.5) AS rank
       FROM memory_fts
       JOIN memory_entries me ON memory_fts.rowid = me.rowid
       WHERE memory_fts MATCH ? AND me.workspace_id = ?
@@ -147,19 +193,14 @@ class MemoryStore {
   searchByProject(workspaceId: string, projectId: string, queryText: string, limit: number = 10): MemorySearchResult[] {
     const db = getDb();
 
-    const sanitized = queryText
-      .replace(/[?*+\-"(){}[\]^~:\\/<>!@#$%&=|;,]/g, ' ')
-      .split(/\s+/)
-      .filter((t) => t.length > 0)
-      .map((t) => `"${t}"`)
-      .join(' OR ');
+    const sanitized = this.buildSearchTerms(queryText);
 
     if (!sanitized) {
       return [];
     }
 
     const rows = db.prepare(`
-      SELECT me.*, rank
+      SELECT me.*, bm25(memory_fts, 5.0, 1.0, 0.5) AS rank
       FROM memory_fts
       JOIN memory_entries me ON memory_fts.rowid = me.rowid
       WHERE memory_fts MATCH ? AND me.workspace_id = ?
@@ -230,6 +271,113 @@ class MemoryStore {
       ORDER BY use_count DESC, confidence DESC, updated_at DESC
       LIMIT ?
     `).all(workspaceId, ...overlappingCategories, limit) as any[]).map(this.rowToEntry);
+  }
+
+  searchByProjectWithIntent(
+    workspaceId: string,
+    projectId: string,
+    queryText: string,
+    intent: TaskIntent,
+    limit: number = 10,
+  ): MemorySearchResult[] {
+    const db = getDb();
+    const sanitized = this.buildSearchTerms(queryText);
+
+    // If no meaningful terms remain after stop-word filtering, use fallback
+    if (!sanitized) {
+      return this.fallbackByIntent(workspaceId, projectId, intent, limit);
+    }
+
+    // Build category boost CASE expression based on intent priority
+    const priorities = INTENT_CATEGORY_PRIORITY[intent];
+    // First category gets weight 4, second 3, third 2, fourth 1, fifth 0
+    const caseParts = priorities.map((cat, i) => `WHEN me.category = '${cat}' THEN ${4 - i}`);
+    const caseExpr = `CASE ${caseParts.join(' ')} ELSE 0 END`;
+
+    const rows = db.prepare(`
+      SELECT me.*, bm25(memory_fts, 5.0, 1.0, 0.5) AS rank,
+             (${caseExpr}) AS category_boost
+      FROM memory_fts
+      JOIN memory_entries me ON memory_fts.rowid = me.rowid
+      WHERE memory_fts MATCH ? AND me.workspace_id = ?
+        AND (me.scope = 'workspace' OR (me.scope = 'project' AND me.source_project_id = ?))
+      ORDER BY rank - (category_boost * 2.0)
+      LIMIT ?
+    `).all(sanitized, workspaceId, projectId, limit) as any[];
+
+    // Increment use counts
+    for (const row of rows) {
+      db.prepare('UPDATE memory_entries SET use_count = use_count + 1 WHERE id = ?').run(row.id);
+    }
+
+    if (rows.length > 0) {
+      return rows.map((row) => ({
+        entry: this.rowToEntry(row),
+        rank: row.rank,
+      }));
+    }
+
+    // FTS5 matched nothing — use intent-aware fallback
+    return this.fallbackByIntent(workspaceId, projectId, intent, limit);
+  }
+
+  private fallbackByIntent(
+    workspaceId: string,
+    projectId: string,
+    intent: TaskIntent,
+    limit: number,
+  ): MemorySearchResult[] {
+    const db = getDb();
+    const priorities = INTENT_CATEGORY_PRIORITY[intent];
+    const results: MemorySearchResult[] = [];
+
+    // Allocate slots proportionally: ~40%, ~25%, ~15%, ~10%, ~10%
+    const slotRatios = [0.4, 0.25, 0.15, 0.1, 0.1];
+
+    for (let i = 0; i < priorities.length && results.length < limit; i++) {
+      const category = priorities[i];
+      const slotsForCategory = Math.max(1, Math.round(limit * slotRatios[i]));
+      const remaining = limit - results.length;
+      const take = Math.min(slotsForCategory, remaining);
+
+      const rows = db.prepare(`
+        SELECT * FROM memory_entries
+        WHERE workspace_id = ? AND category = ?
+          AND (scope = 'workspace' OR (scope = 'project' AND source_project_id = ?))
+        ORDER BY use_count DESC, confidence DESC
+        LIMIT ?
+      `).all(workspaceId, category, projectId, take) as any[];
+
+      for (const row of rows) {
+        results.push({ entry: this.rowToEntry(row), rank: 0 });
+      }
+    }
+
+    // Increment use counts for returned entries
+    for (const r of results) {
+      db.prepare('UPDATE memory_entries SET use_count = use_count + 1 WHERE id = ?').run(r.entry.id);
+    }
+
+    return results;
+  }
+
+  /**
+   * Strips stop words and task-instruction verbs from the query,
+   * sanitizes for FTS5, and caps at 12 meaningful tokens.
+   */
+  private buildSearchTerms(queryText: string): string {
+    const tokens = queryText
+      .toLowerCase()
+      .replace(/[?*+\-"(){}[\]^~:\\/<>!@#$%&=|;,.'_]/g, ' ')
+      .split(/\s+/)
+      .filter((t) => t.length > 1 && !STOP_WORDS.has(t))
+      .slice(0, 12);
+
+    if (tokens.length === 0) {
+      return '';
+    }
+
+    return tokens.map((t) => `"${t}"`).join(' OR ');
   }
 
   private rowToEntry(row: any): MemoryEntry {

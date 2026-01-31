@@ -503,6 +503,15 @@ const migrations = [
       CREATE INDEX idx_plans_session ON plans(plan_session_id);
     `,
   },
+  {
+    name: '018_rebuild_memory_fts',
+    sql: '',
+    run(db: Database.Database) {
+      // Rebuild FTS index to ensure consistency.
+      // bm25() column weights (key=5.0, content=1.0, category=0.5) are applied at query time.
+      db.exec(`INSERT INTO memory_fts(memory_fts) VALUES('rebuild')`);
+    },
+  },
 ];
 
 export function closeDatabase(): void {
