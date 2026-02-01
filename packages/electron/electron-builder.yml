@@ -79,3 +79,6 @@ linux:
   icon: resources/icon.png
   category: Development
   maintainer: cloudscode
+
+deb:
+  afterInstall: scripts/postinst.sh
