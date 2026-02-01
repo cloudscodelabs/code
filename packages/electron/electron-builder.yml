@@ -15,7 +15,7 @@ files:
   - node_modules/**/*
   - package.json
   - "!**/.turbo"
-  - "!**/src"
+  - "!src"
   - "!**/tsconfig*.json"
   - "!**/*.tsbuildinfo"
   - "!**/*.ts"
