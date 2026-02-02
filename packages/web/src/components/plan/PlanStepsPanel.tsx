@@ -2,6 +2,7 @@ import { Circle, CheckCircle2, XCircle, Loader2, SkipForward, Shield, ShieldChec
 import type { PlanStep, PlanStepStatus } from '@cloudscode/shared';
 import { usePlanPanelStore } from '../../stores/plan-panel-store.js';
 import { useWorkflowStore } from '../../stores/workflow-store.js';
+import { useElapsedTime } from '../../hooks/useElapsedTime.js';
 
 const statusIcons: Record<PlanStepStatus, React.ReactNode> = {
   pending: <Circle size={16} className="text-zinc-500" />,
@@ -30,7 +31,7 @@ export function PlanStepsPanel() {
   if (!currentPlan) return null;
 
   return (
-    <div className="border-b border-zinc-700 px-4 py-3 max-h-[40%] overflow-y-auto">
+    <div className="px-4 py-3 flex-1 overflow-y-auto h-full">
       <div className="mb-2">
         <h3 className="text-sm font-medium text-zinc-200">{currentPlan.title}</h3>
         {currentPlan.summary && (
@@ -50,6 +51,15 @@ export function PlanStepsPanel() {
 function StepItem({ step, index }: { step: PlanStep; index: number }) {
   const qualityGateResults = useWorkflowStore((s) => s.qualityGateResults);
   const gateResult = qualityGateResults[step.id];
+  const stepAgentMap = usePlanPanelStore((s) => s.stepAgentMap);
+  const planAgents = usePlanPanelStore((s) => s.planAgents);
+  const planToolActivity = usePlanPanelStore((s) => s.planToolActivity);
+
+  const agentId = stepAgentMap[step.id];
+  const agent = agentId ? planAgents.get(agentId) : undefined;
+  const agentTools = agentId ? planToolActivity.filter((t) => t.agentId === agentId) : [];
+  const runningTool = agentTools.find((t) => t.status === 'running');
+  const completedTools = agentTools.filter((t) => t.status === 'completed');
 
   return (
     <div className="flex items-start gap-2 p-2 rounded bg-zinc-800/50">
@@ -88,10 +98,73 @@ function StepItem({ step, index }: { step: PlanStep; index: number }) {
             </span>
           )}
         </div>
+
+        {/* Inline agent activity for in_progress steps */}
+        {step.status === 'in_progress' && agent && (
+          <StepAgentActivity
+            startedAt={agent.startedAt}
+            runningToolName={runningTool?.toolName}
+            completedToolCount={completedTools.length}
+            costUsd={agent.costUsd}
+          />
+        )}
+
+        {/* Completed step metadata */}
+        {step.status === 'completed' && agent && (
+          <div className="flex items-center gap-2 mt-1 text-[10px] text-zinc-500">
+            {agent.durationMs != null && (
+              <span>{formatDuration(agent.durationMs)}</span>
+            )}
+            {agent.costUsd > 0 && (
+              <span>${agent.costUsd.toFixed(4)}</span>
+            )}
+          </div>
+        )}
+
         {step.resultSummary && (
           <p className="text-[10px] text-zinc-500 mt-1 line-clamp-1">{step.resultSummary}</p>
         )}
       </div>
     </div>
   );
+}
+
+function StepAgentActivity({
+  startedAt,
+  runningToolName,
+  completedToolCount,
+  costUsd,
+}: {
+  startedAt: number;
+  runningToolName?: string;
+  completedToolCount: number;
+  costUsd: number;
+}) {
+  const elapsed = useElapsedTime(startedAt);
+
+  return (
+    <div className="flex items-center gap-2 mt-1.5 text-[10px] text-zinc-400">
+      <span className="text-zinc-500">{elapsed}</span>
+      {runningToolName && (
+        <span className="flex items-center gap-1">
+          <Loader2 size={10} className="text-blue-400 animate-spin" />
+          <span className="font-mono">{runningToolName}</span>
+        </span>
+      )}
+      {completedToolCount > 0 && (
+        <span className="text-zinc-500">{completedToolCount} tools run</span>
+      )}
+      {costUsd > 0 && (
+        <span className="text-zinc-500">${costUsd.toFixed(4)}</span>
+      )}
+    </div>
+  );
+}
+
+function formatDuration(ms: number): string {
+  const secs = Math.round(ms / 1000);
+  if (secs < 60) return `${secs}s`;
+  const mins = Math.floor(secs / 60);
+  const rem = secs % 60;
+  return `${mins}m ${rem}s`;
 }

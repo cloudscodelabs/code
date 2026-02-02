@@ -253,6 +253,12 @@ function handleMessage(message: ServerMessage): void {
       break;
     }
 
+    case 'plan:step_agent' as any: {
+      const { stepId, agentId } = (message as any).payload;
+      usePlanPanelStore.getState().setStepAgent(stepId, agentId);
+      break;
+    }
+
     case 'plan:execution_started': {
       usePlanPanelStore.getState().setExecuting(true);
       break;

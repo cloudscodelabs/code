@@ -5,6 +5,15 @@ import { usePlanPanelStore } from '../../stores/plan-panel-store.js';
 import { StreamingText } from '../chat/StreamingText.js';
 import { Markdown } from '../chat/Markdown.js';
 
+/** Strip complete and partial (unclosed) ```plan blocks from streaming text */
+function filterStreamingPlanBlock(text: string): string {
+  // Strip complete blocks
+  let filtered = text.replace(/```plan\s*\n[\s\S]*?\n```/g, '');
+  // Strip partial (unclosed) block at end of stream
+  filtered = filtered.replace(/```plan\s*\n[\s\S]*$/g, '');
+  return filtered.trim();
+}
+
 export function PlanChatArea() {
   const messages = usePlanPanelStore((s) => s.messages);
   const isStreaming = usePlanPanelStore((s) => s.isStreaming);
@@ -104,17 +113,21 @@ export function PlanChatArea() {
         ))}
 
         {/* Streaming response */}
-        {isStreaming && streamingContent && (
-          <div className="flex gap-3">
-            <div className="mt-1 shrink-0 w-7 h-7 rounded-full flex items-center justify-center bg-indigo-600">
-              <Bot size={14} />
+        {isStreaming && streamingContent && (() => {
+          const filtered = filterStreamingPlanBlock(streamingContent);
+          if (!filtered) return null;
+          return (
+            <div className="flex gap-3">
+              <div className="mt-1 shrink-0 w-7 h-7 rounded-full flex items-center justify-center bg-indigo-600">
+                <Bot size={14} />
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="text-xs text-zinc-500 mb-1">Plan Assistant</div>
+                <StreamingText content={filtered} />
+              </div>
             </div>
-            <div className="flex-1 min-w-0">
-              <div className="text-xs text-zinc-500 mb-1">Plan Assistant</div>
-              <StreamingText content={streamingContent} />
-            </div>
-          </div>
-        )}
+          );
+        })()}
 
         {/* Error display */}
         {error && (

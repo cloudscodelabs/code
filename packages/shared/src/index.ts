@@ -45,7 +45,7 @@ export type {
   ContextUpdateMessage, ProjectCreatedMessage, ProjectResumedMessage, ProjectListMessage,
   ProjectMessagesMessage, ProjectPlanMessagesMessage, ProjectAgentsMessage, MemoryUpdatedMessage,
   PlanSendMessage, PlanInterruptMessage, PlanApproveMessage, PlanSaveMessage, PlanCancelMessage, PlanExecuteMessage,
-  PlanUpdatedMessage, PlanStepUpdatedMessage, PlanExecutionStartedMessage, PlanExecutionCompletedMessage,
+  PlanUpdatedMessage, PlanStepUpdatedMessage, PlanStepAgentMessage, PlanExecutionStartedMessage, PlanExecutionCompletedMessage,
   PlanSavedMessage, PlanListMessage,
   WorkflowCreateMessage, WorkflowResumeMessage, WorkflowRollbackMessage,
   WorkflowSuggestionMessage, WorkflowCheckpointMessage, WorkflowQualityGateMessage, WorkflowRollbackCompletedMessage,

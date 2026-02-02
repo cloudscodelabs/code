@@ -7,6 +7,9 @@ import { PlansPanelBody } from './PlansPanelBody.js';
 export function PlansPanel() {
   const isOpen = usePlanPanelStore((s) => s.isOpen);
   const isStreaming = usePlanPanelStore((s) => s.isStreaming);
+  const currentPlan = usePlanPanelStore((s) => s.currentPlan);
+  const view = usePlanPanelStore((s) => s.view);
+  const hasPlan = currentPlan !== null && view !== 'list';
 
   const [mounted, setMounted] = useState(false);
   const [visible, setVisible] = useState(false);
@@ -63,7 +66,9 @@ export function PlansPanel() {
 
       {/* Panel — slides from right */}
       <div
-        className={`absolute top-0 right-0 bottom-0 w-full max-w-4xl bg-zinc-900 border-l border-zinc-700 flex flex-col transition-transform duration-300 ease-out ${
+        className={`absolute top-0 right-0 bottom-0 w-full bg-zinc-900 border-l border-zinc-700 flex flex-col transition-[transform,max-width] duration-300 ease-out ${
+          hasPlan ? 'max-w-7xl' : 'max-w-4xl'
+        } ${
           visible ? 'translate-x-0' : 'translate-x-full'
         }`}
       >

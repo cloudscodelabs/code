@@ -23,7 +23,6 @@ export function PlanDetailHeader() {
 
   const canExecute =
     (currentPlan.status === 'ready' ||
-      currentPlan.status === 'completed' ||
       currentPlan.status === 'failed') &&
     !isExecuting;
 

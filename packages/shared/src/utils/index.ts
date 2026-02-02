@@ -28,3 +28,7 @@ export function truncate(text: string, maxLength: number): string {
   if (text.length <= maxLength) return text;
   return text.slice(0, maxLength - 3) + '...';
 }
+
+export function stripPlanBlock(text: string): string {
+  return text.replace(/```plan\s*\n[\s\S]*?\n```/g, '').trim();
+}

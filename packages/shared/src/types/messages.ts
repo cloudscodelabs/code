@@ -141,6 +141,7 @@ export type ServerMessage =
   | ProjectSetupCompletedMessage
   | PlanUpdatedMessage
   | PlanStepUpdatedMessage
+  | PlanStepAgentMessage
   | PlanExecutionStartedMessage
   | PlanExecutionCompletedMessage
   | PlanSavedMessage
@@ -308,6 +309,14 @@ export interface PlanStepUpdatedMessage {
   payload: {
     planId: string;
     step: PlanStep;
+  };
+}
+
+export interface PlanStepAgentMessage {
+  type: 'plan:step_agent';
+  payload: {
+    stepId: string;
+    agentId: string;
   };
 }
 

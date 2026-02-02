@@ -18,7 +18,7 @@ import { getDb } from '../db/database.js';
 import { logger } from '../logger.js';
 import { runSubAgent, type SubAgentPlan, type SubAgentResult } from './sub-agent-runner.js';
 import { agentDefinitions } from './agent-definitions.js';
-import { buildProjectContext } from './context-builder.js';
+import { buildProjectContext, ExecutionContextCache } from './context-builder.js';
 import { getMemoryStore, detectTaskIntent } from '../context/memory-store.js';
 import { buildUnifiedKnowledge } from './knowledge-dedup.js';
 import { resolveModelId } from './model-utils.js';
@@ -26,7 +26,7 @@ import { getWorkspaceFiles } from '../workspace/workspace-files.js';
 import { MAX_ROUTING_HISTORY_MESSAGES, MAX_ROUTING_MESSAGE_LENGTH, MAX_MEMORY_INJECTION_ENTRIES, generateId, nowUnix } from '@cloudscode/shared';
 import { getPlanManager } from '../plans/plan-manager.js';
 import { detectWorkflowIntent } from '../workflows/intent-detector.js';
-import { getWorkflowManager } from '../workflows/workflow-manager.js';
+import { getWorkflowManager, computeParallelGroups } from '../workflows/workflow-manager.js';
 import { WorkflowExecutor } from '../workflows/workflow-executor.js';
 
 // ---------------------------------------------------------------------------
@@ -367,6 +367,7 @@ class Orchestrator {
   private planModeActive = false;
   private currentPlan: Plan | null = null;
   private planAbortController: AbortController | null = null;
+  private planExecutionAbortController: AbortController | null = null;
   private currentPlanSessionId: string | null = null;
 
   constructor(config: Config) {
@@ -556,6 +557,10 @@ class Orchestrator {
     if (this.planAbortController) {
       this.planAbortController.abort();
       logger.info('Plan query interrupted');
+    }
+    if (this.planExecutionAbortController) {
+      this.planExecutionAbortController.abort();
+      logger.info('Plan execution interrupted');
     }
   }
 
@@ -1355,25 +1360,11 @@ class Orchestrator {
       // Strip the ```plan``` JSON block from chat — the steps UI already shows it
       const chatText = responseText.replace(/```plan\s*\n[\s\S]*?\n```/g, '').trim();
 
-      // Broadcast the response via plan channel
-      if (chatText) {
-        broadcast({
-          type: 'chat:message',
-          payload: {
-            role: 'assistant',
-            content: chatText,
-            agentId: orchestratorNode.id,
-            timestamp: Date.now(),
-            channel: 'plan',
-          },
-        });
-      }
-
       agentManager.setAgentResponse(orchestratorNode.id, responseText);
       agentManager.updateAgentStatus(orchestratorNode.id, 'completed', responseText.slice(0, 500));
 
-      // Persist assistant plan message (full text kept for history), scoped to plan session
-      projectManager.addMessage(project.id, 'assistant', responseText, orchestratorNode.id, 'plan', this.currentPlanSessionId ?? undefined);
+      // Persist stripped text — plan JSON is already stored in the plan record
+      projectManager.addMessage(project.id, 'assistant', chatText || responseText, orchestratorNode.id, 'plan', this.currentPlanSessionId ?? undefined);
 
     } catch (err) {
       logger.error({ err }, 'Plan mode error');
@@ -1566,6 +1557,142 @@ class Orchestrator {
     }
   }
 
+  /**
+   * Executes a single plan step by directly calling runSubAgent(), bypassing
+   * Phase 1 (routing) and Phase 3 (synthesis). Falls back to handleNormalMode()
+   * if the step has no agentType.
+   */
+  private async executePlanStep(
+    step: PlanStep,
+    ws: WebSocket,
+    project: Project,
+    model: string,
+    channel?: 'chat' | 'plan',
+    executionCache?: ExecutionContextCache,
+    planSignal?: AbortSignal,
+  ): Promise<string> {
+    // If the plan-level signal is already aborted, bail out immediately
+    if (planSignal?.aborted) {
+      throw new Error('Plan execution aborted');
+    }
+
+    // Fallback: if step has no agentType, use full routing pipeline
+    if (!step.agentType) {
+      await this.handleNormalMode(
+        `[Plan Step ${step.id}] ${step.title}\n\n${step.description}`,
+        ws,
+        project,
+        model,
+        channel,
+      );
+      return '';
+    }
+
+    const agentManager = getAgentManager();
+    const contextManager = getContextManager();
+    const summaryCache = getSummaryCache();
+    const projectManager = getProjectManager();
+
+    // Create orchestrator agent node for tracking
+    const orchestratorNode = agentManager.createAgent(project.id, 'orchestrator', null, null, model, channel ?? undefined);
+    this.currentAgentNodeId = orchestratorNode.id;
+
+    this.abortController = new AbortController();
+    const signal = this.abortController.signal;
+
+    // If plan-level signal aborts, cascade to this step's abort controller
+    const onPlanAbort = () => this.abortController?.abort();
+    planSignal?.addEventListener('abort', onPlanAbort, { once: true });
+
+    const cwd = project.directoryPath ?? this.config.PROJECT_ROOT;
+
+    try {
+      // Build SubAgentPlan from step
+      const plan: SubAgentPlan = {
+        agentType: step.agentType as Exclude<AgentType, 'orchestrator'>,
+        taskDescription: `[Plan Step ${step.id}] ${step.title}\n\n${step.description}`,
+        model,
+      };
+
+      // Pre-create agent node and per-agent abort controller
+      const preCreatedAgentNode = agentManager.createAgent(
+        project.id,
+        plan.agentType,
+        orchestratorNode.id,
+        plan.taskDescription,
+        plan.model ?? null,
+        channel ?? undefined,
+      );
+      const agentAbortController = new AbortController();
+      this.subAgentAbortControllers.set(preCreatedAgentNode.id, agentAbortController);
+
+      // Link step to agent so the client can show inline activity
+      broadcast({
+        type: 'plan:step_agent',
+        payload: { stepId: step.id, agentId: preCreatedAgentNode.id },
+      } as any);
+
+      // Run sub-agent directly — no routing, no synthesis
+      const result = await runSubAgent(plan, project, orchestratorNode.id, signal as any, cwd, {
+        preCreatedAgentNode,
+        agentAbortController,
+        ...(channel ? { channel } : {}),
+        executionCache,
+      });
+
+      this.subAgentAbortControllers.delete(preCreatedAgentNode.id);
+
+      const finalResponse = result.responseText || '';
+
+      // Update orchestrator node tracking
+      agentManager.updateAgentCost(orchestratorNode.id, result.costUsd, result.inputTokens + result.outputTokens);
+      agentManager.setAgentResponse(orchestratorNode.id, finalResponse);
+      agentManager.updateAgentStatus(orchestratorNode.id, result.status === 'completed' ? 'completed' : 'failed', finalResponse.slice(0, 500));
+
+      // Update context budget
+      contextManager.updateBudget(project.id, {
+        inputTokens: result.inputTokens,
+        outputTokens: result.outputTokens,
+        cacheReadTokens: result.cacheReadTokens,
+        cacheWriteTokens: result.cacheWriteTokens,
+        costUsd: result.costUsd,
+      }, { agentRunId: orchestratorNode.id, agentType: 'orchestrator' });
+
+      // Update per-agent breakdown
+      contextManager.updateAgentUsage(project.id, result.agentId, result.agentType, {
+        inputTokens: result.inputTokens,
+        outputTokens: result.outputTokens,
+        cacheReadTokens: result.cacheReadTokens,
+        cacheWriteTokens: result.cacheWriteTokens,
+        costUsd: result.costUsd,
+      });
+
+      // Update summary cache
+      summaryCache.updateFromResponse(project.id, plan.taskDescription, finalResponse);
+
+      // Persist the final response
+      projectManager.addMessage(project.id, 'assistant', finalResponse, orchestratorNode.id, channel);
+
+      // Refresh project state
+      const refreshed = projectManager.getProject(project.id);
+      if (refreshed) this.currentProject = refreshed;
+
+      if (result.status !== 'completed') {
+        throw new Error(`Plan step ${step.id} failed`);
+      }
+
+      return finalResponse;
+    } catch (err) {
+      logger.error({ err, stepId: step.id }, 'executePlanStep error');
+      agentManager.updateAgentStatus(orchestratorNode.id, 'failed');
+      throw err;
+    } finally {
+      planSignal?.removeEventListener('abort', onPlanAbort);
+      this.abortController = null;
+      this.subAgentAbortControllers.clear();
+    }
+  }
+
   private async executePlan(plan: Plan, ws: WebSocket): Promise<void> {
     if (!this.currentProject) {
       sendTo(ws, { type: 'chat:error', payload: { message: 'No active project' } });
@@ -1584,6 +1711,15 @@ class Orchestrator {
     // Exit plan mode
     this.setPlanMode(false);
 
+    // Plan-level abort controller — checked between steps to stop the loop
+    this.planExecutionAbortController = new AbortController();
+    const planSignal = this.planExecutionAbortController.signal;
+
+    // Shared context cache for all subagents in this plan execution
+    const executionCache = new ExecutionContextCache();
+    // Collect response texts for batched knowledge extraction
+    const responseTexts: string[] = [];
+
     try {
       // If workflow metadata exists, delegate to WorkflowExecutor
       if (plan.workflowMetadata) {
@@ -1592,30 +1728,43 @@ class Orchestrator {
         await executor.execute(plan, project, ws, {
           cwd,
           model: this.currentModel,
+          executePlanStep: (step, wsRef, proj, model) =>
+            this.executePlanStep(step, wsRef, proj, model, 'plan', executionCache, planSignal).then((text) => {
+              if (text) responseTexts.push(text);
+            }),
           handleNormalMode: (content, wsRef, proj, model) =>
             this.handleNormalMode(content, wsRef, proj, model, 'plan'),
         });
+
+        // Batched knowledge extraction for workflow path
+        if (responseTexts.length > 0) {
+          getKnowledgeExtractor().extractBatch(
+            project.workspaceId, project.id, responseTexts,
+          ).catch((err) => {
+            logger.error({ err }, 'Batched knowledge extraction failed');
+          });
+        }
         return;
       }
 
-      // Legacy sequential execution path
+      // Legacy plan execution — use parallel groups
       const executionOrder = this.buildExecutionOrder(plan.steps);
+      const stepsWithDeps = executionOrder.map((s) => ({
+        id: s.id,
+        dependencies: s.dependencies ?? [],
+      }));
+      const groups = computeParallelGroups(stepsWithDeps);
+      const stepMap = new Map(executionOrder.map((s) => [s.id, s]));
       let allSucceeded = true;
 
-      for (const step of executionOrder) {
+      const executeOneStep = async (step: PlanStep): Promise<void> => {
         step.status = 'in_progress';
         planManager.updatePlanStep(plan.id, step);
         broadcast({ type: 'plan:step_updated', payload: { planId: plan.id, step } });
 
         try {
-          await this.handleNormalMode(
-            `[Plan Step ${step.id}] ${step.title}\n\n${step.description}`,
-            ws,
-            project,
-            this.currentModel,
-            'plan',
-          );
-
+          const text = await this.executePlanStep(step, ws, project, this.currentModel, 'plan', executionCache, planSignal);
+          if (text) responseTexts.push(text);
           step.status = 'completed';
         } catch (err) {
           logger.error({ err, stepId: step.id }, 'Plan step execution failed');
@@ -1625,13 +1774,47 @@ class Orchestrator {
 
         planManager.updatePlanStep(plan.id, step);
         broadcast({ type: 'plan:step_updated', payload: { planId: plan.id, step } });
+      };
 
-        if (step.status === 'failed') {
+      for (const group of groups) {
+        if (planSignal.aborted || !allSucceeded) break;
+
+        const stepsInGroup = group
+          .map((id) => stepMap.get(id))
+          .filter((s): s is PlanStep => s != null);
+
+        if (stepsInGroup.length === 1) {
+          await executeOneStep(stepsInGroup[0]);
+        } else {
+          await Promise.all(stepsInGroup.map((step) => executeOneStep(step)));
+        }
+
+        if (stepsInGroup.some((s) => s.status === 'failed')) {
           break;
         }
       }
 
-      const finalStatus = allSucceeded ? 'completed' : 'failed';
+      // Mark remaining pending steps as skipped if plan was aborted
+      if (planSignal.aborted) {
+        for (const step of plan.steps) {
+          if (step.status === 'pending') {
+            step.status = 'skipped';
+            planManager.updatePlanStep(plan.id, step);
+            broadcast({ type: 'plan:step_updated', payload: { planId: plan.id, step } });
+          }
+        }
+      }
+
+      // Batched knowledge extraction after all steps complete
+      if (responseTexts.length > 0) {
+        getKnowledgeExtractor().extractBatch(
+          project.workspaceId, project.id, responseTexts,
+        ).catch((err) => {
+          logger.error({ err }, 'Batched knowledge extraction failed');
+        });
+      }
+
+      const finalStatus = planSignal.aborted ? 'failed' : (allSucceeded ? 'completed' : 'failed');
       plan.status = finalStatus;
       planManager.updatePlan(plan.id, { status: finalStatus });
       broadcast({ type: 'plan:updated', payload: plan });
@@ -1641,6 +1824,7 @@ class Orchestrator {
       planManager.updatePlan(plan.id, { status: 'failed' });
       broadcast({ type: 'plan:updated', payload: plan });
     } finally {
+      this.planExecutionAbortController = null;
       // Always signal completion if still marked executing
       if (plan.status === 'executing') {
         plan.status = 'failed';
@@ -1677,6 +1861,11 @@ class Orchestrator {
     if (this.abortController) {
       this.abortController.abort();
       logger.info('Query interrupted');
+    }
+    // Also abort any running plan execution so the loop doesn't start new steps
+    if (this.planExecutionAbortController) {
+      this.planExecutionAbortController.abort();
+      logger.info('Plan execution interrupted via interrupt()');
     }
   }
 

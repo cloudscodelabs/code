@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import type { Plan, PlanStep, AgentNode, AgentToolActivity } from '@cloudscode/shared';
+import { stripPlanBlock } from '@cloudscode/shared';
 import type { ChatMessage } from './chat-store.js';
 
 type PlanPanelView = 'list' | 'detail' | 'create';
@@ -19,6 +20,7 @@ interface PlanPanelState {
   // Plan agent tracking
   planAgents: Map<string, AgentNode>;
   planToolActivity: AgentToolActivity[];
+  stepAgentMap: Record<string, string>;
 
   // Actions — panel lifecycle
   openPanel: () => void;
@@ -46,6 +48,7 @@ interface PlanPanelState {
   // Actions — plan agents
   addPlanAgent: (agent: AgentNode) => void;
   updatePlanAgent: (agent: AgentNode) => void;
+  setStepAgent: (stepId: string, agentId: string) => void;
   addPlanToolActivity: (activity: AgentToolActivity) => void;
   updatePlanToolResult: (toolCallId: string, output: unknown, status: 'completed' | 'failed', durationMs: number) => void;
   clearPlanAgents: () => void;
@@ -64,6 +67,7 @@ export const usePlanPanelStore = create<PlanPanelState>((set) => ({
   error: null,
   planAgents: new Map(),
   planToolActivity: [],
+  stepAgentMap: {},
 
   openPanel: () => set({ isOpen: true, view: 'list' }),
   closePanel: () => set({ isOpen: false, view: 'list' }),
@@ -81,6 +85,7 @@ export const usePlanPanelStore = create<PlanPanelState>((set) => ({
       error: null,
       planAgents: new Map(),
       planToolActivity: [],
+      stepAgentMap: {},
     }),
 
   setView: (view) => set({ view }),
@@ -95,6 +100,7 @@ export const usePlanPanelStore = create<PlanPanelState>((set) => ({
       error: null,
       planAgents: new Map(),
       planToolActivity: [],
+      stepAgentMap: {},
     }),
 
   setPlan: (plan) => set({ currentPlan: plan }),
@@ -125,7 +131,8 @@ export const usePlanPanelStore = create<PlanPanelState>((set) => ({
 
   finishStreaming: () =>
     set((state) => {
-      if (state.streamingContent) {
+      const stripped = stripPlanBlock(state.streamingContent);
+      if (stripped) {
         return {
           isStreaming: false,
           streamingContent: '',
@@ -134,7 +141,7 @@ export const usePlanPanelStore = create<PlanPanelState>((set) => ({
             {
               id: `plan-stream-${++planMessageCounter}`,
               role: 'assistant' as const,
-              content: state.streamingContent,
+              content: stripped,
               agentId: 'orchestrator',
               timestamp: Date.now(),
             },
@@ -146,7 +153,11 @@ export const usePlanPanelStore = create<PlanPanelState>((set) => ({
 
   setError: (error) => set({ error, isStreaming: false }),
 
-  loadMessages: (messages) => set({ messages }),
+  loadMessages: (messages) => set({
+    messages: messages
+      .map((m) => m.role === 'assistant' ? { ...m, content: stripPlanBlock(m.content) } : m)
+      .filter((m) => m.content.length > 0),
+  }),
 
   clearTransient: () =>
     set({
@@ -169,6 +180,11 @@ export const usePlanPanelStore = create<PlanPanelState>((set) => ({
       return { planAgents };
     }),
 
+  setStepAgent: (stepId, agentId) =>
+    set((state) => ({
+      stepAgentMap: { ...state.stepAgentMap, [stepId]: agentId },
+    })),
+
   addPlanToolActivity: (activity) =>
     set((state) => ({
       planToolActivity: [...state.planToolActivity.slice(-50), activity],
@@ -181,5 +197,5 @@ export const usePlanPanelStore = create<PlanPanelState>((set) => ({
       ),
     })),
 
-  clearPlanAgents: () => set({ planAgents: new Map(), planToolActivity: [] }),
+  clearPlanAgents: () => set({ planAgents: new Map(), planToolActivity: [], stepAgentMap: {} }),
 }));
