@@ -141,6 +141,24 @@ class KnowledgeExtractor {
   }
 
   /**
+   * Batch extraction: concatenates multiple step responses and runs a single
+   * extraction call instead of one per step. Used after plan execution.
+   */
+  async extractBatch(
+    workspaceId: string,
+    projectId: string,
+    texts: string[],
+    complexity: ExtractionComplexity = 'low',
+  ): Promise<ExtractedFact[]> {
+    const combined = texts
+      .filter((t) => t.length > 100)
+      .map((t, i) => `--- Step ${i + 1} ---\n${t}`)
+      .join('\n\n');
+    if (!combined) return [];
+    return this.extract(workspaceId, projectId, combined, complexity);
+  }
+
+  /**
    * Finds an existing memory entry that is similar to the given fact.
    * Checks entries in the same category for key overlap: exact match
    * or >= 50% word overlap between keys.

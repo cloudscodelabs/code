@@ -4,6 +4,55 @@ import { getPlanManager } from '../plans/plan-manager.js';
 import { getWorkflowTemplateStore } from './workflow-template-store.js';
 import { logger } from '../logger.js';
 
+/**
+ * BFS level-order grouping by dependency graph. Exported for reuse in
+ * orchestrator's legacy plan execution path.
+ *
+ * Accepts any array of items with `id` and `dependencies` fields,
+ * so it works with both WorkflowTemplateStep and PlanStep.
+ */
+export function computeParallelGroups(steps: Array<{ id: string; dependencies: string[] }>): string[][] {
+  const stepIds = new Set(steps.map((s) => s.id));
+  const inDegree = new Map<string, number>();
+  const dependents = new Map<string, string[]>();
+
+  for (const step of steps) {
+    inDegree.set(step.id, 0);
+    dependents.set(step.id, []);
+  }
+
+  for (const step of steps) {
+    let deg = 0;
+    for (const dep of step.dependencies) {
+      if (stepIds.has(dep)) {
+        deg++;
+        dependents.get(dep)!.push(step.id);
+      }
+    }
+    inDegree.set(step.id, deg);
+  }
+
+  const groups: string[][] = [];
+  let queue = [...inDegree.entries()].filter(([, d]) => d === 0).map(([id]) => id);
+
+  while (queue.length > 0) {
+    groups.push([...queue]);
+    const nextQueue: string[] = [];
+    for (const id of queue) {
+      for (const dep of dependents.get(id) ?? []) {
+        const newDeg = (inDegree.get(dep) ?? 1) - 1;
+        inDegree.set(dep, newDeg);
+        if (newDeg === 0) {
+          nextQueue.push(dep);
+        }
+      }
+    }
+    queue = nextQueue;
+  }
+
+  return groups;
+}
+
 class WorkflowManager {
   createFromTemplate(
     projectId: string,
@@ -27,7 +76,7 @@ class WorkflowManager {
       qualityGate: ts.qualityGate,
     }));
 
-    const parallelGroups = this.computeParallelGroups(template.steps);
+    const parallelGroups = computeParallelGroups(template.steps);
 
     const workflowMetadata: WorkflowMetadata = {
       templateId: template.id,
@@ -49,49 +98,6 @@ class WorkflowManager {
 
     logger.info({ planId: plan.id, templateId, projectId }, 'Plan created from workflow template');
     return plan;
-  }
-
-  computeParallelGroups(steps: WorkflowTemplateStep[]): string[][] {
-    // BFS level-order grouping by dependency graph
-    const stepIds = new Set(steps.map((s) => s.id));
-    const inDegree = new Map<string, number>();
-    const dependents = new Map<string, string[]>();
-
-    for (const step of steps) {
-      inDegree.set(step.id, 0);
-      dependents.set(step.id, []);
-    }
-
-    for (const step of steps) {
-      let deg = 0;
-      for (const dep of step.dependencies) {
-        if (stepIds.has(dep)) {
-          deg++;
-          dependents.get(dep)!.push(step.id);
-        }
-      }
-      inDegree.set(step.id, deg);
-    }
-
-    const groups: string[][] = [];
-    let queue = [...inDegree.entries()].filter(([, d]) => d === 0).map(([id]) => id);
-
-    while (queue.length > 0) {
-      groups.push([...queue]);
-      const nextQueue: string[] = [];
-      for (const id of queue) {
-        for (const dep of dependents.get(id) ?? []) {
-          const newDeg = (inDegree.get(dep) ?? 1) - 1;
-          inDegree.set(dep, newDeg);
-          if (newDeg === 0) {
-            nextQueue.push(dep);
-          }
-        }
-      }
-      queue = nextQueue;
-    }
-
-    return groups;
   }
 
   getTemplatesForProject(projectId: string): WorkflowTemplate[] {

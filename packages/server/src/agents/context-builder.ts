@@ -11,6 +11,71 @@ import { logger } from '../logger.js';
 
 const MAX_CONVERSATION_CONTEXT_LENGTH = 500;
 
+/**
+ * Caches shared context across subagents within a single plan execution.
+ * Project context, workspace files, session summary, and conversation are
+ * identical for agents in the same plan run — only memory search differs.
+ */
+export class ExecutionContextCache {
+  private projectCtx: string | null | undefined = undefined; // undefined = not yet fetched
+  private workspaceCtx: string | null | undefined = undefined;
+  private sessionSummary: string | null | undefined = undefined;
+  private conversationCtx: string | null | undefined = undefined;
+
+  getProjectContext(project: Project): string | null {
+    if (this.projectCtx === undefined) {
+      this.projectCtx = buildProjectContext(project);
+    }
+    return this.projectCtx;
+  }
+
+  getWorkspaceContext(): string | null {
+    if (this.workspaceCtx === undefined) {
+      try {
+        const workspaceFiles = getWorkspaceFiles();
+        this.workspaceCtx = workspaceFiles.getContext();
+      } catch {
+        this.workspaceCtx = null;
+      }
+    }
+    return this.workspaceCtx;
+  }
+
+  getSessionSummary(projectId: string): string | null {
+    if (this.sessionSummary === undefined) {
+      try {
+        const summaryCache = getSummaryCache();
+        this.sessionSummary = summaryCache.getSummary(projectId);
+      } catch {
+        this.sessionSummary = null;
+      }
+    }
+    return this.sessionSummary;
+  }
+
+  getConversationContext(projectId: string): string | null {
+    if (this.conversationCtx === undefined) {
+      try {
+        const projectManager = getProjectManager();
+        const recentMessages = projectManager.getRecentMessages(projectId, 10);
+        if (recentMessages.length > 0) {
+          this.conversationCtx = recentMessages.map((m) => {
+            const content = m.content.length > MAX_CONVERSATION_CONTEXT_LENGTH
+              ? m.content.slice(0, MAX_CONVERSATION_CONTEXT_LENGTH) + '...'
+              : m.content;
+            return `${m.role}: ${content}`;
+          }).join('\n');
+        } else {
+          this.conversationCtx = null;
+        }
+      } catch {
+        this.conversationCtx = null;
+      }
+    }
+    return this.conversationCtx;
+  }
+}
+
 export interface ContextPackage {
   systemPrompt: string;
   agentType: AgentType;
@@ -27,6 +92,7 @@ export function buildContextPackage(
   agentType: Exclude<AgentType, 'orchestrator'>,
   taskDescription: string,
   contextHintOverrides?: Partial<ContextHints>,
+  cache?: ExecutionContextCache,
 ): ContextPackage {
   const definition = getAgentDefinition(agentType);
 
@@ -50,7 +116,9 @@ export function buildContextPackage(
   if (hints.projectContext || hints.memory) {
     let unifiedContent: string | null = null;
     try {
-      const projectCtx = hints.projectContext ? buildProjectContext(project) : null;
+      const projectCtx = hints.projectContext
+        ? (cache ? cache.getProjectContext(project) : buildProjectContext(project))
+        : null;
       let memoryEntries: MemoryEntry[] = [];
 
       if (hints.memory) {
@@ -88,16 +156,18 @@ export function buildContextPackage(
   // Workspace files (PROJECT.md, CONVENTIONS.md)
   if (hints.workspaceFiles) {
     let wsContent: string | null = null;
-    try {
-      const workspaceFiles = getWorkspaceFiles();
-      const wsContext = workspaceFiles.getContext();
-      if (wsContext) {
-        parts.push(`\n\n## Workspace Files\n${wsContext}`);
-        wsContent = wsContext;
+    if (cache) {
+      wsContent = cache.getWorkspaceContext();
+    } else {
+      try {
+        const workspaceFiles = getWorkspaceFiles();
+        wsContent = workspaceFiles.getContext();
+      } catch {
+        logger.debug('WorkspaceFiles not available for context package');
       }
-    } catch {
-      // WorkspaceFiles may not be initialized
-      logger.debug('WorkspaceFiles not available for context package');
+    }
+    if (wsContent) {
+      parts.push(`\n\n## Workspace Files\n${wsContent}`);
     }
     sections.push({ name: 'Workspace Files', included: true, content: wsContent });
   } else {
@@ -107,15 +177,18 @@ export function buildContextPackage(
   // Session summary
   if (hints.summary) {
     let summaryContent: string | null = null;
-    try {
-      const summaryCache = getSummaryCache();
-      const summary = summaryCache.getSummary(project.id);
-      if (summary) {
-        parts.push(`\n\n## Session State\n${summary}`);
-        summaryContent = summary;
+    if (cache) {
+      summaryContent = cache.getSessionSummary(project.id);
+    } else {
+      try {
+        const summaryCache = getSummaryCache();
+        summaryContent = summaryCache.getSummary(project.id);
+      } catch {
+        logger.debug('SummaryCache not available for context package');
       }
-    } catch {
-      logger.debug('SummaryCache not available for context package');
+    }
+    if (summaryContent) {
+      parts.push(`\n\n## Session State\n${summaryContent}`);
     }
     sections.push({ name: 'Session Summary', included: true, content: summaryContent });
   } else {
@@ -125,21 +198,26 @@ export function buildContextPackage(
   // Conversation context (recent chat messages)
   if (hints.conversationContext) {
     let convContent: string | null = null;
-    try {
-      const projectManager = getProjectManager();
-      const recentMessages = projectManager.getRecentMessages(project.id, 10);
-      if (recentMessages.length > 0) {
-        const formatted = recentMessages.map((m) => {
-          const content = m.content.length > MAX_CONVERSATION_CONTEXT_LENGTH
-            ? m.content.slice(0, MAX_CONVERSATION_CONTEXT_LENGTH) + '...'
-            : m.content;
-          return `${m.role}: ${content}`;
-        }).join('\n');
-        parts.push(`\n\n## Recent Conversation\n${formatted}`);
-        convContent = formatted;
+    if (cache) {
+      convContent = cache.getConversationContext(project.id);
+    } else {
+      try {
+        const projectManager = getProjectManager();
+        const recentMessages = projectManager.getRecentMessages(project.id, 10);
+        if (recentMessages.length > 0) {
+          convContent = recentMessages.map((m) => {
+            const content = m.content.length > MAX_CONVERSATION_CONTEXT_LENGTH
+              ? m.content.slice(0, MAX_CONVERSATION_CONTEXT_LENGTH) + '...'
+              : m.content;
+            return `${m.role}: ${content}`;
+          }).join('\n');
+        }
+      } catch {
+        logger.debug('ProjectManager not available for conversation context');
       }
-    } catch {
-      logger.debug('ProjectManager not available for conversation context');
+    }
+    if (convContent) {
+      parts.push(`\n\n## Recent Conversation\n${convContent}`);
     }
     sections.push({ name: 'Conversation', included: true, content: convContent });
   } else {

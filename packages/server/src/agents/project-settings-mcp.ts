@@ -167,11 +167,28 @@ function broadcastSettingsUpdate(
 }
 
 // ---------------------------------------------------------------------------
+// MCP Server Cache — reuse stateless MCP servers across subagents
+// ---------------------------------------------------------------------------
+
+const mcpServerCache = new Map<string, ReturnType<typeof createSdkMcpServer>>();
+
+export function clearMcpServerCache(projectId?: string): void {
+  if (projectId) {
+    mcpServerCache.delete(projectId);
+  } else {
+    mcpServerCache.clear();
+  }
+}
+
+// ---------------------------------------------------------------------------
 // MCP Server Factory
 // ---------------------------------------------------------------------------
 
 export function createProjectSettingsMcpServer(projectId: string) {
-  return createSdkMcpServer({
+  const cached = mcpServerCache.get(projectId);
+  if (cached) return cached;
+
+  const server = createSdkMcpServer({
     name: 'project-settings',
     tools: [
       // ----- Tool 1: get_project_settings -----
@@ -449,4 +466,7 @@ export function createProjectSettingsMcpServer(projectId: string) {
       ),
     ],
   });
+
+  mcpServerCache.set(projectId, server);
+  return server;
 }

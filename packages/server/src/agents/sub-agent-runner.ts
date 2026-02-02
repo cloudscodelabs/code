@@ -4,7 +4,7 @@ import type { AgentType, AgentNode } from '@cloudscode/shared';
 import { createProjectSettingsMcpServer } from './project-settings-mcp.js';
 import { getAgentManager } from './agent-manager.js';
 import { createSubAgentHooksConfig } from './hooks.js';
-import { buildContextPackage } from './context-builder.js';
+import { buildContextPackage, type ExecutionContextCache } from './context-builder.js';
 import type { ContextHints } from './agent-definitions.js';
 import type { Project } from '@cloudscode/shared';
 import { buildAuthEnv } from '../auth/build-env.js';
@@ -35,6 +35,7 @@ export interface SubAgentOptions {
   preCreatedAgentNode?: AgentNode;
   agentAbortController?: AbortController;
   channel?: 'setup' | 'chat' | 'plan';
+  executionCache?: ExecutionContextCache;
 }
 
 /**
@@ -72,6 +73,7 @@ export async function runSubAgent(
     plan.agentType,
     plan.taskDescription,
     plan.contextHints,
+    options?.executionCache,
   );
 
   // Broadcast context sections to the UI

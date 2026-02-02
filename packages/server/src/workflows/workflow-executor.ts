@@ -9,6 +9,7 @@ import { RollbackManager } from './rollback-manager.js';
 interface ExecutorOptions {
   cwd: string;
   model?: string;
+  executePlanStep?: (step: PlanStep, ws: WebSocket, project: Project, model: string) => Promise<void>;
   handleNormalMode: (content: string, ws: WebSocket, project: Project, model: string) => Promise<void>;
 }
 
@@ -115,12 +116,16 @@ export class WorkflowExecutor {
     broadcast({ type: 'plan:step_updated', payload: { planId: plan.id, step } });
 
     try {
-      await options.handleNormalMode(
-        `[Workflow Step ${step.id}] ${step.title}\n\n${step.description}`,
-        ws,
-        project,
-        options.model ?? 'sonnet',
-      );
+      if (step.agentType && options.executePlanStep) {
+        await options.executePlanStep(step, ws, project, options.model ?? 'sonnet');
+      } else {
+        await options.handleNormalMode(
+          `[Workflow Step ${step.id}] ${step.title}\n\n${step.description}`,
+          ws,
+          project,
+          options.model ?? 'sonnet',
+        );
+      }
 
       // Basic step output validation
       const validation = validateStepOutput(step, step.resultSummary ?? 'completed');
