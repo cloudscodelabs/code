@@ -1729,7 +1729,7 @@ class Orchestrator {
           cwd,
           model: this.currentModel,
           executePlanStep: (step, wsRef, proj, model) =>
-            this.executePlanStep(step, wsRef, proj, model, 'plan', executionCache, planSignal).then((text) => {
+            this.executePlanStep(step, wsRef, proj, model, 'plan', executionCache, planSignal as any).then((text) => {
               if (text) responseTexts.push(text);
             }),
           handleNormalMode: (content, wsRef, proj, model) =>
@@ -1763,7 +1763,7 @@ class Orchestrator {
         broadcast({ type: 'plan:step_updated', payload: { planId: plan.id, step } });
 
         try {
-          const text = await this.executePlanStep(step, ws, project, this.currentModel, 'plan', executionCache, planSignal);
+          const text = await this.executePlanStep(step, ws, project, this.currentModel, 'plan', executionCache, planSignal as any);
           if (text) responseTexts.push(text);
           step.status = 'completed';
         } catch (err) {
